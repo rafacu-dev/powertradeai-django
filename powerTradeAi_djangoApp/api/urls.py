@@ -7,7 +7,7 @@ from __future__ import annotations
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from .views import AlertViewSet, ScanRunViewSet, StrategyViewSet
+from .views import AlertViewSet, ReplayView, ScanRunViewSet, StrategyViewSet
 
 app_name = "powertradeai"
 
@@ -16,4 +16,7 @@ router.register("alerts", AlertViewSet, basename="alert")
 router.register("strategies", StrategyViewSet, basename="strategy")
 router.register("scans", ScanRunViewSet, basename="scan")
 
-urlpatterns = [path("", include(router.urls))]
+urlpatterns = [
+    path("replay/", ReplayView.as_view(), name="replay"),
+    path("", include(router.urls)),
+]

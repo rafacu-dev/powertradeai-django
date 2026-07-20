@@ -1,15 +1,16 @@
-"""Endpoints de lectura. La API no crea ni modifica alertas: eso lo hace el
-motor. Aqui solo se consulta."""
+"""Endpoints de lectura y replay on-demand."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.db.models import Avg, Count, Q, Sum
-from rest_framework import viewsets
+from rest_framework import serializers as drf_serializers, viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from ..auth import ApiKeyAuthentication
 from ..models import Alert, ScanRun, Strategy
@@ -138,3 +139,135 @@ class ScanRunViewSet(ApiKeyViewSet):
 
     serializer_class = ScanRunSerializer
     queryset = ScanRun.objects.all()[:200]
+
+
+class ReplayView(APIView):
+    """Replay on-demand via HTTP.
+
+    POST /api/powertradeai/replay/
+    {
+        "desde": "2026-07-14",
+        "hasta": "2026-07-18",
+        "strategy": ["SPY_ORB15_BASE"],   // opcional
+        "save": false                      // opcional, default false
+    }
+
+    Corre el motor de replay contra datos historicos y devuelve los resultados.
+    Con save=false (default) NO persiste nada en la BD — solo calcula y responde.
+    Con save=true guarda como source=replay (equivale al comando replay_range).
+    """
+
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        desde = request.data.get("desde")
+        hasta = request.data.get("hasta", desde)
+        if not desde:
+            raise ValidationError({"desde": "requerido (YYYY-MM-DD)"})
+
+        try:
+            start = datetime.strptime(desde, "%Y-%m-%d").date()
+            end = datetime.strptime(hasta, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            raise ValidationError("desde/hasta deben tener formato YYYY-MM-DD")
+
+        if start > end:
+            raise ValidationError("desde no puede ser posterior a hasta")
+        if (end - start).days > 30:
+            raise ValidationError("rango maximo: 30 dias")
+
+        strategy_ids = request.data.get("strategy")
+        if isinstance(strategy_ids, str):
+            strategy_ids = [strategy_ids]
+        save = request.data.get("save", True)
+
+        from ..engine.replay import replay_day
+        from ..engine.session import is_trading_day
+
+        days = [
+            start + timedelta(days=i)
+            for i in range((end - start).days + 1)
+            if is_trading_day(start + timedelta(days=i))
+        ]
+        if not days:
+            return Response({"days": [], "summary": {
+                "sesiones": 0, "alertas": 0, "neto": "0.00",
+            }})
+
+        all_days = []
+        total_alerts = 0
+        total_closed = 0
+        net = Decimal("0.00")
+
+        for day in days:
+            try:
+                result = replay_day(
+                    day,
+                    strategy_ids=strategy_ids,
+                    overwrite=save,
+                )
+            except Exception as exc:
+                all_days.append({
+                    "date": str(day), "error": str(exc), "alerts": [],
+                })
+                continue
+
+            day_alerts = []
+            for alert in result.alerts:
+                entry = {
+                    "strategy_id": alert.strategy.strategy_id,
+                    "symbol": alert.symbol,
+                    "direction": alert.direction,
+                    "occ_symbol": alert.occ_symbol,
+                    "strike": str(alert.strike),
+                    "entry_premium": str(alert.entry_premium),
+                    "exit_premium": str(alert.exit_premium) if alert.exit_premium is not None else None,
+                    "exit_reason": alert.exit_reason,
+                    "net_dollars": str(alert.net_dollars) if alert.net_dollars is not None else None,
+                    "net_pct": str(alert.net_pct) if alert.net_pct is not None else None,
+                    "status": alert.status,
+                }
+                day_alerts.append(entry)
+
+            day_net = result.net_total
+            net += day_net
+            total_alerts += len(result.alerts)
+            total_closed += len(result.closed)
+
+            all_days.append({
+                "date": str(day),
+                "alerts": day_alerts,
+                "net": str(day_net),
+            })
+
+            if not save:
+                Alert.objects.filter(
+                    session_date=day,
+                    source=Alert.Source.REPLAY,
+                    pk__in=[a.pk for a in result.alerts],
+                ).delete()
+
+        winners = 0
+        for d in all_days:
+            for a in d.get("alerts", []):
+                nd = a.get("net_dollars")
+                if nd is not None and Decimal(nd) > 0:
+                    winners += 1
+
+        return Response({
+            "days": all_days,
+            "summary": {
+                "sesiones": len(days),
+                "alertas": total_alerts,
+                "cerradas": total_closed,
+                "ganadoras": winners,
+                "perdedoras": total_closed - winners,
+                "neto": str(net),
+                "save": save,
+                "disclaimer": (
+                    "Reconstruccion sin latencia ni competencia por fill. "
+                    "El neto es un limite superior optimista."
+                ),
+            },
+        })
