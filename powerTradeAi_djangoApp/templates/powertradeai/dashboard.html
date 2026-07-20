@@ -1,0 +1,546 @@
+{% load i18n %}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PowerTradeAI</title>
+<style>
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --border: #e2e4e9;
+  --text: #1a1d23;
+  --text-2: #5f6370;
+  --text-3: #9194a0;
+  --accent: #3b5bdb;
+  --green: #0ca678;
+  --green-bg: #e6fcf5;
+  --red: #e03131;
+  --red-bg: #fff5f5;
+  --amber: #e67700;
+  --amber-bg: #fff9db;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318;
+    --surface: #1a1d24;
+    --border: #2c2f38;
+    --text: #e4e5e9;
+    --text-2: #9194a0;
+    --text-3: #5f6370;
+    --accent: #5c7cfa;
+    --green: #20c997;
+    --green-bg: #0b2922;
+    --red: #ff6b6b;
+    --red-bg: #2c1515;
+    --amber: #fcc419;
+    --amber-bg: #2c2510;
+  }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.shell {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+header h1 {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+header h1 span {
+  color: var(--accent);
+}
+
+.logout {
+  font-size: 13px;
+  color: var(--text-2);
+  text-decoration: none;
+}
+.logout:hover { color: var(--text); }
+
+/* ---- Stats ---- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+
+.stat-value {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value.positive { color: var(--green); }
+.stat-value.negative { color: var(--red); }
+
+/* ---- Filters ---- */
+.filters-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin-bottom: 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.filter-group label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-3);
+}
+
+.filter-group select,
+.filter-group input[type="date"] {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.filter-group select:focus,
+.filter-group input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.btn {
+  height: 34px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: opacity 0.15s;
+}
+.btn:hover { opacity: 0.85; }
+.btn:active { transform: scale(0.98); }
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+}
+
+/* ---- Replay panel ---- */
+.replay-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 24px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.replay-panel .filter-group input[type="date"] {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.replay-status {
+  font-size: 13px;
+  color: var(--text-2);
+  margin-left: 8px;
+  align-self: center;
+}
+
+.replay-result {
+  width: 100%;
+  margin-top: 8px;
+  display: none;
+}
+
+.replay-result.visible { display: block; }
+
+.replay-result table {
+  width: 100%;
+}
+
+/* ---- Table ---- */
+.table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: left;
+  padding: 10px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-3);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+thead th.right, td.right { text-align: right; }
+
+tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+
+tbody tr:hover { background: var(--bg); }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.badge-call { background: #dbe4ff; color: #364fc7; }
+.badge-put  { background: #ffe3e3; color: #c92a2a; }
+
+@media (prefers-color-scheme: dark) {
+  .badge-call { background: #253369; color: #748ffc; }
+  .badge-put  { background: #4a1c1c; color: #ff8787; }
+}
+
+.badge-live { background: var(--green-bg); color: var(--green); }
+.badge-replay { background: var(--amber-bg); color: var(--amber); }
+.badge-pending { background: var(--amber-bg); color: var(--amber); }
+.badge-closed { background: var(--green-bg); color: var(--green); }
+.badge-expired, .badge-error { background: var(--red-bg); color: var(--red); }
+
+.positive { color: var(--green); }
+.negative { color: var(--red); }
+.muted { color: var(--text-3); }
+
+.empty-state {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text-3);
+}
+
+.table-footer {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-3);
+  border-top: 1px solid var(--border);
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 600px) {
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .filters-bar, .replay-panel { flex-direction: column; align-items: stretch; }
+  .filter-group select, .filter-group input[type="date"] { width: 100%; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header>
+  <h1><span>Power</span>TradeAI</h1>
+  <a href="{% url 'admin:logout' %}" class="logout">Cerrar sesion</a>
+</header>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat">
+    <div class="stat-label">Neto</div>
+    <div class="stat-value {% if stats.net > 0 %}positive{% elif stats.net < 0 %}negative{% endif %}">
+      ${{ stats.net|floatformat:2 }}
+    </div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Cerradas</div>
+    <div class="stat-value">{{ stats.total }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Win rate</div>
+    <div class="stat-value">{% if stats.win_rate != None %}{{ stats.win_rate }}%{% else %}&mdash;{% endif %}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Ganadoras</div>
+    <div class="stat-value positive">{{ stats.winners }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Perdedoras</div>
+    <div class="stat-value negative">{{ stats.losers }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Pendientes</div>
+    <div class="stat-value">{{ stats.pending }}</div>
+  </div>
+</div>
+
+<!-- Filters -->
+<form method="get" class="filters-bar">
+  <div class="filter-group">
+    <label>Fuente</label>
+    <select name="source">
+      <option value="all" {% if filters.source == "all" %}selected{% endif %}>Todas</option>
+      <option value="live" {% if filters.source == "live" %}selected{% endif %}>Live</option>
+      <option value="replay" {% if filters.source == "replay" %}selected{% endif %}>Replay</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label>Estrategia</label>
+    <select name="strategy">
+      <option value="">Todas</option>
+      {% for sid in strategies %}
+      <option value="{{ sid }}" {% if filters.strategy == sid %}selected{% endif %}>{{ sid }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="filter-group">
+    <label>Direccion</label>
+    <select name="direction">
+      <option value="">Todas</option>
+      <option value="CALL" {% if filters.direction == "CALL" %}selected{% endif %}>Call</option>
+      <option value="PUT" {% if filters.direction == "PUT" %}selected{% endif %}>Put</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label>Desde</label>
+    <input type="date" name="desde" value="{{ filters.desde }}">
+  </div>
+  <div class="filter-group">
+    <label>Hasta</label>
+    <input type="date" name="hasta" value="{{ filters.hasta }}">
+  </div>
+  <button type="submit" class="btn btn-primary">Filtrar</button>
+  <a href="{% url 'powertradeai:dashboard' %}" class="btn btn-ghost">Limpiar</a>
+</form>
+
+<!-- Replay -->
+<div class="replay-panel">
+  <div class="filter-group">
+    <label>Analizar dia</label>
+    <input type="date" id="replay-date">
+  </div>
+  <button class="btn btn-primary" id="replay-btn" onclick="runReplay()">Lanzar replay</button>
+  <span class="replay-status" id="replay-status"></span>
+  <div class="replay-result" id="replay-result">
+    <table>
+      <thead>
+        <tr>
+          <th>Regla</th>
+          <th>Dir</th>
+          <th class="right">Strike</th>
+          <th class="right">Compra</th>
+          <th class="right">Venta</th>
+          <th>Salida</th>
+          <th class="right">Neto</th>
+          <th class="right">Retorno</th>
+        </tr>
+      </thead>
+      <tbody id="replay-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Alerts table -->
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Fecha</th>
+        <th>Regla</th>
+        <th>Dir</th>
+        <th>Fuente</th>
+        <th class="right">Strike</th>
+        <th class="right">Compra</th>
+        <th class="right">Venta</th>
+        <th>Salida</th>
+        <th class="right">Neto $</th>
+        <th class="right">Neto %</th>
+        <th>Estado</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in alerts %}
+      <tr>
+        <td>{{ a.session_date|date:"d M" }}</td>
+        <td>{{ a.strategy.strategy_id }}</td>
+        <td><span class="badge badge-{{ a.direction|lower }}">{{ a.direction }}</span></td>
+        <td><span class="badge badge-{{ a.source }}">{{ a.source }}</span></td>
+        <td class="right">{{ a.strike }}</td>
+        <td class="right">{{ a.entry_premium }}</td>
+        <td class="right">{% if a.exit_premium != None %}{{ a.exit_premium }}{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+        <td>{% if a.exit_reason %}{{ a.exit_reason }}{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+        <td class="right {% if a.net_dollars != None %}{% if a.net_dollars > 0 %}positive{% else %}negative{% endif %}{% endif %}">
+          {% if a.net_dollars != None %}{{ a.net_dollars|floatformat:2 }}{% else %}<span class="muted">pending</span>{% endif %}
+        </td>
+        <td class="right {% if a.net_pct != None %}{% if a.net_pct > 0 %}positive{% else %}negative{% endif %}{% endif %}">
+          {% if a.net_pct != None %}{{ a.net_pct|floatformat:2 }}%{% else %}<span class="muted">pending</span>{% endif %}
+        </td>
+        <td><span class="badge badge-{{ a.status }}">{{ a.status }}</span></td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="11" class="empty-state">No hay alertas con estos filtros</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if alerts %}
+  <div class="table-footer">Mostrando {{ alerts|length }} alertas (max 200)</div>
+  {% endif %}
+</div>
+
+</div>
+
+<script>
+function runReplay() {
+  const dateInput = document.getElementById('replay-date');
+  const status = document.getElementById('replay-status');
+  const btn = document.getElementById('replay-btn');
+  const resultDiv = document.getElementById('replay-result');
+  const tbody = document.getElementById('replay-tbody');
+
+  if (!dateInput.value) {
+    status.textContent = 'Selecciona una fecha';
+    return;
+  }
+
+  btn.disabled = true;
+  status.textContent = 'Analizando...';
+  resultDiv.classList.remove('visible');
+
+  fetch("{% url 'powertradeai:replay_action' %}", {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-CSRFToken': '{{ csrf_token }}',
+    },
+    body: 'date=' + encodeURIComponent(dateInput.value),
+  })
+  .then(r => r.json())
+  .then(data => {
+    btn.disabled = false;
+    if (data.error) {
+      status.textContent = data.error;
+      return;
+    }
+
+    status.textContent = data.total + ' alertas, neto ' + data.net + '$';
+    tbody.innerHTML = '';
+
+    if (data.alerts.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-3);padding:16px;">Sin senal este dia</td></tr>';
+    } else {
+      data.alerts.forEach(a => {
+        const net = a.net ? parseFloat(a.net) : null;
+        const pct = a.pct ? parseFloat(a.pct) : null;
+        const cls = net !== null ? (net > 0 ? 'positive' : 'negative') : 'muted';
+        const dirCls = a.direction === 'CALL' ? 'badge-call' : 'badge-put';
+        tbody.innerHTML += '<tr>' +
+          '<td>' + a.strategy + '</td>' +
+          '<td><span class="badge ' + dirCls + '">' + a.direction + '</span></td>' +
+          '<td class="right">' + (a.strike || '') + '</td>' +
+          '<td class="right">' + (a.entry || '') + '</td>' +
+          '<td class="right">' + (a.exit || '—') + '</td>' +
+          '<td>' + (a.reason || '—') + '</td>' +
+          '<td class="right ' + cls + '">' + (net !== null ? net.toFixed(2) : 'pending') + '</td>' +
+          '<td class="right ' + cls + '">' + (pct !== null ? pct.toFixed(2) + '%' : 'pending') + '</td>' +
+          '</tr>';
+      });
+    }
+
+    if (data.errors && data.errors.length > 0) {
+      data.errors.forEach(e => {
+        tbody.innerHTML += '<tr><td colspan="8" style="color:var(--red);">' + e.rule + ': ' + e.detail + '</td></tr>';
+      });
+    }
+
+    resultDiv.classList.add('visible');
+  })
+  .catch(err => {
+    btn.disabled = false;
+    status.textContent = 'Error: ' + err.message;
+  });
+}
+</script>
+</body>
+</html>

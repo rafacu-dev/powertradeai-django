@@ -9,7 +9,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import AlertViewSet, ReplayView, ScanRunViewSet, StrategyViewSet
 
-app_name = "powertradeai"
+app_name = "powertradeai-api"
 
 router = DefaultRouter()
 router.register("alerts", AlertViewSet, basename="alert")

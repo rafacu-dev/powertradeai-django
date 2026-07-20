@@ -32,3 +32,6 @@ dependencies = [
 [tool.setuptools]
 # Solo la app: el resto del repo (research/, paper/, etc.) no se empaqueta.
 packages = { find = { include = ["powerTradeAi_djangoApp*"] } }
+
+[tool.setuptools.package-data]
+"powerTradeAi_djangoApp" = ["templates/**/*.html"]
