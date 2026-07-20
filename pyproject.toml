@@ -7,6 +7,15 @@ name = "powertradeai-django"
 version = "1.0.0"
 description = "App de Django que escanea el mercado, evalua las estrategias del proyecto y registra alertas con su P&L."
 requires-python = ">=3.12"
+# Combinacion verificada (los 37 tests de este repo + 41 de paridad en
+# LocalQuantAI corren sobre ella):
+#
+#   Python 3.14.5 | Django 6.0.7 | DRF 3.17.1
+#   pandas 3.0.3  | numpy 2.4.6  | thetadata 1.0.9 | alpaca-py 0.43.4
+#
+# Los minimos de abajo son permisivos, no verificados: pandas 2.x deberia
+# funcionar —solo se usan APIs estables— pero nadie lo ha comprobado. Si tu
+# proyecto anfitrion fija pandas 2.x, corre los tests antes de confiar.
 dependencies = [
     "django>=5.0",
     "djangorestframework>=3.15",
