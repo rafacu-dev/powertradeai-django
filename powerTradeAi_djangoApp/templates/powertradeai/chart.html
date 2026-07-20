@@ -224,17 +224,76 @@ const HTF_STYLES = {
 
 const HTF_LABELS = { '1h': '1H', '1d': 'D', '1w': 'W' };
 
-const BB_COLOR = '#868e96';
+const BB_COLOR = '#4c8dff';       // linea de las bandas (azul)
+const BB_FILL = 'rgba(76, 141, 255, 0.12)';  // relleno translucido azulito
 
 let chart = null;
 let candleSeries = null;
 let maSeriesMap = {};
 let bbSeries = {};
+let bbFill = null;
 let priceLines = [];
 let currentSymbol = null;
 
 function isDark() {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+// Primitive de canvas: pinta el area entre la banda superior y la inferior.
+// Lightweight Charts v4 no trae "band series", asi que lo dibujamos a mano.
+function createBollingerFill() {
+  let points = [];   // [{time, upper, lower}]
+  let series = null, chartRef = null, requestUpdate = null;
+
+  const renderer = {
+    draw(target) {
+      if (points.length < 2 || !series) return;
+      const ts = chartRef.timeScale();
+      target.useMediaCoordinateSpace((scope) => {
+        const ctx = scope.context;
+        ctx.beginPath();
+        let started = false;
+        for (const p of points) {
+          const x = ts.timeToCoordinate(p.time);
+          const y = series.priceToCoordinate(p.upper);
+          if (x == null || y == null) continue;
+          if (!started) { ctx.moveTo(x, y); started = true; }
+          else ctx.lineTo(x, y);
+        }
+        if (!started) return;
+        for (let i = points.length - 1; i >= 0; i--) {
+          const p = points[i];
+          const x = ts.timeToCoordinate(p.time);
+          const y = series.priceToCoordinate(p.lower);
+          if (x == null || y == null) continue;
+          ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = BB_FILL;
+        ctx.fill();
+      });
+    },
+  };
+
+  const paneView = {
+    renderer: () => renderer,
+    zOrder: () => 'bottom',   // detras de las velas
+  };
+
+  return {
+    attached(params) {
+      chartRef = params.chart;
+      series = params.series;
+      requestUpdate = params.requestUpdate;
+    },
+    detached() {},
+    paneViews: () => [paneView],
+    updateAllViews() {},
+    setData(pts) {
+      points = pts;
+      if (requestUpdate) requestUpdate();
+    },
+  };
 }
 
 function chartColors() {
@@ -285,6 +344,10 @@ function createChart() {
     borderUpColor: '#0ca678', borderDownColor: '#e03131',
     wickUpColor: '#0ca678', wickDownColor: '#e03131',
   });
+
+  // Relleno azulito entre las bandas (usa la escala de precio de las velas).
+  bbFill = createBollingerFill();
+  candleSeries.attachPrimitive(bbFill);
 
   for (const period of Object.keys(MA_COLORS)) {
     maSeriesMap[period] = chart.addLineSeries({
@@ -337,6 +400,14 @@ async function loadData() {
     bbSeries.upper.setData(bb.upper || []);
     bbSeries.middle.setData(bb.middle || []);
     bbSeries.lower.setData(bb.lower || []);
+
+    // Alimentar el relleno: combinar upper/lower por timestamp.
+    const lowerByTime = {};
+    for (const p of (bb.lower || [])) lowerByTime[p.time] = p.value;
+    const fillPts = (bb.upper || [])
+      .filter(p => lowerByTime[p.time] != null)
+      .map(p => ({ time: p.time, upper: p.value, lower: lowerByTime[p.time] }));
+    if (bbFill) bbFill.setData(fillPts);
 
     // Higher-timeframe MAs as horizontal price lines: clear and redraw.
     for (const pl of priceLines) candleSeries.removePriceLine(pl);
