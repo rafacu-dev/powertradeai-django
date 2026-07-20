@@ -223,9 +223,26 @@ def chart_data(request):
                 lines[str(p)] = val
         htf_lines[tf_name] = lines
 
+    bb_period, bb_std = 20, 2
+    bb = {"upper": [], "middle": [], "lower": []}
+    if len(bars_15m) >= bb_period:
+        closes = bars_15m["close"]
+        mid = closes.rolling(bb_period).mean()
+        std = closes.rolling(bb_period).std()
+        for ts in bars_15m.index:
+            t = int(ts.timestamp())
+            if t < display_ts or pd.isna(mid[ts]):
+                continue
+            m = round(float(mid[ts]), 2)
+            s = round(float(std[ts]) * bb_std, 2)
+            bb["upper"].append({"time": t, "value": m + s})
+            bb["middle"].append({"time": t, "value": m})
+            bb["lower"].append({"time": t, "value": m - s})
+
     return JsonResponse({
         "symbol": symbol,
         "candles": candles,
         "ma_curves": ma_curves,
         "htf_lines": htf_lines,
+        "bollinger": bb,
     })

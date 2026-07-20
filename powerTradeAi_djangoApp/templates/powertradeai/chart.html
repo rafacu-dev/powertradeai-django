@@ -195,6 +195,7 @@ header a {
     <button id="load-btn">Cargar</button>
     <button id="auto-btn" style="background:var(--green)">Live</button>
     <span id="auto-status" style="font-size:12px;font-weight:600;color:var(--green)">LIVE</span>
+    <span id="last-update" style="font-size:11px;color:var(--text-3)"></span>
   </div>
 
   <div id="chart-container">
@@ -223,9 +224,14 @@ const HTF_STYLES = {
 
 const HTF_LABELS = { '1h': '1H', '1d': 'D', '1w': 'W' };
 
+const BB_COLOR = '#868e96';
+
 let chart = null;
 let candleSeries = null;
 let maSeriesMap = {};
+let bbSeries = {};
+let priceLines = [];
+let currentSymbol = null;
 
 function isDark() {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -244,6 +250,8 @@ function createChart() {
   const container = document.getElementById('chart-container');
   if (chart) { chart.remove(); chart = null; }
   maSeriesMap = {};
+  bbSeries = {};
+  priceLines = [];
 
   const c = chartColors();
   chart = LightweightCharts.createChart(container, {
@@ -258,11 +266,32 @@ function createChart() {
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   });
 
+  // Bollinger fill (band area) drawn first so it sits behind candles.
+  bbSeries.upper = chart.addLineSeries({
+    color: BB_COLOR, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  });
+  bbSeries.lower = chart.addLineSeries({
+    color: BB_COLOR, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  });
+  bbSeries.middle = chart.addLineSeries({
+    color: BB_COLOR, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  });
+
   candleSeries = chart.addCandlestickSeries({
     upColor: '#0ca678', downColor: '#e03131',
     borderUpColor: '#0ca678', borderDownColor: '#e03131',
     wickUpColor: '#0ca678', wickDownColor: '#e03131',
   });
+
+  for (const period of Object.keys(MA_COLORS)) {
+    maSeriesMap[period] = chart.addLineSeries({
+      color: MA_COLORS[period], lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+  }
 
   new ResizeObserver(() => {
     chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
@@ -274,39 +303,47 @@ function buildLegend() {
   el.innerHTML = '<span style="font-weight:600">15m MAs:</span> ' +
     Object.entries(MA_COLORS).map(([p, color]) =>
       `<span><span class="dot" style="background:${color}"></span>MA ${p}</span>`
-    ).join('');
+    ).join('') +
+    `<span><span class="dot" style="background:${BB_COLOR}"></span>Bollinger 20,2</span>`;
 }
 
 async function loadData() {
   const symbol = document.getElementById('symbol').value.trim().toUpperCase() || 'SPY';
   const days = document.getElementById('days').value;
   const loading = document.getElementById('loading');
-  loading.style.display = 'flex';
+  const firstLoad = !chart;
+  if (firstLoad) loading.style.display = 'flex';
 
   try {
     const resp = await fetch(`{% url 'powertradeai:chart_data' %}?symbol=${symbol}&days=${days}`);
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
 
-    createChart();
+    // Recreate the chart only on first load or when the symbol changes;
+    // otherwise just push new data so the user's zoom/pan is preserved.
+    const rebuild = firstLoad || symbol !== currentSymbol;
+    if (rebuild) createChart();
+
+    // Preserve the visible range across a live refresh.
+    const savedRange = rebuild ? null : chart.timeScale().getVisibleLogicalRange();
+
     candleSeries.setData(data.candles);
 
-    for (const [period, series] of Object.entries(data.ma_curves)) {
-      if (!series.length) continue;
-      const lineSeries = chart.addLineSeries({
-        color: MA_COLORS[period] || '#888',
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false,
-      });
-      lineSeries.setData(series);
-      maSeriesMap[period] = lineSeries;
+    for (const period of Object.keys(MA_COLORS)) {
+      maSeriesMap[period].setData(data.ma_curves[period] || []);
     }
 
+    const bb = data.bollinger || {};
+    bbSeries.upper.setData(bb.upper || []);
+    bbSeries.middle.setData(bb.middle || []);
+    bbSeries.lower.setData(bb.lower || []);
+
+    // Higher-timeframe MAs as horizontal price lines: clear and redraw.
+    for (const pl of priceLines) candleSeries.removePriceLine(pl);
+    priceLines = [];
     for (const [tf, lines] of Object.entries(data.htf_lines)) {
       for (const [period, price] of Object.entries(lines)) {
-        candleSeries.createPriceLine({
+        priceLines.push(candleSeries.createPriceLine({
           price: price,
           color: MA_COLORS[period] || '#888',
           lineWidth: HTF_STYLES[tf]?.width || 1,
@@ -315,11 +352,16 @@ async function loadData() {
             : LightweightCharts.LineStyle.Solid,
           axisLabelVisible: true,
           title: `${HTF_LABELS[tf]} MA${period}`,
-        });
+        }));
       }
     }
 
-    chart.timeScale().fitContent();
+    if (rebuild) {
+      chart.timeScale().fitContent();
+    } else if (savedRange) {
+      chart.timeScale().setVisibleLogicalRange(savedRange);
+    }
+    currentSymbol = symbol;
 
     const htfEl = document.getElementById('htf-legend');
     let htfHtml = '';
@@ -332,12 +374,18 @@ async function loadData() {
       htfHtml += `<span><strong>${HTF_LABELS[tf]}</strong> (${style}): ${entries}</span>`;
     }
     htfEl.innerHTML = htfHtml;
+    document.getElementById('last-update').textContent =
+      'Actualizado ' + new Date().toLocaleTimeString();
   } catch (err) {
-    document.getElementById('loading').textContent = 'Error: ' + err.message;
-    document.getElementById('loading').style.display = 'flex';
+    if (firstLoad) {
+      loading.textContent = 'Error: ' + err.message;
+      loading.style.display = 'flex';
+    } else {
+      document.getElementById('last-update').textContent = 'Error al actualizar';
+    }
     return;
   } finally {
-    loading.style.display = 'none';
+    if (firstLoad) loading.style.display = 'none';
   }
 }
 
