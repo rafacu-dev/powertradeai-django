@@ -7,6 +7,13 @@ class PowerTradeAiConfig(AppConfig):
     label = "powertradeai"
     verbose_name = "PowerTradeAI"
 
-    def ready(self):
-        # Importa las reglas para que se auto-registren en el catalogo.
-        from . import strategies  # noqa: F401
+    # NO se importan las reglas aqui a proposito.
+    #
+    # Hacerlo cargaria pandas y numpy (~100 MB residentes) en TODOS los
+    # procesos que arranquen Django, incluido el servidor web — que solo sirve
+    # la API de lectura y nunca evalua una regla. En un plan de 512 MB eso es
+    # memoria regalada.
+    #
+    # El catalogo se puebla solo cuando alguien lo necesita: importar
+    # ``powerTradeAi_djangoApp.strategies`` registra las reglas, y eso lo hacen
+    # el motor de escaneo y los comandos de gestion, no la API.
