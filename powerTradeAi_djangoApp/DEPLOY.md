@@ -4,7 +4,26 @@ Guía para instalar la app en **tu** proyecto Django y desplegarlo en Render con
 el worker de escaneo. Configuración de arranque acordada: **las 14 reglas en
 shadow, intervalo de 10 s**.
 
-## 0. Requisitos
+## 0. Qué le pasa a tu proyecto
+
+Antes de instalar nada, lo que esto cambia:
+
+| | impacto |
+|---|---|
+| **Dependencias** | +190 MB (pandas 69, grpcio 40, numpy 32, polars 9, clientes 2). Build más lento y más RAM en reposo. En un plan de 512 MB, vigila el consumo del worker. |
+| **Python** | exige **3.12+** (`thetadata`). Con 3.11 o menos no instala. |
+| **Base de datos** | +4 tablas (`Strategy`, `Alert`, `ApiKey`, `ScanRun`). No toca las tuyas, pero las migraciones corren contra tu base de producción. |
+| **Config DRF** | **ninguno si sigues este documento** — ver más abajo. |
+| **Admin** | aparecen 4 modelos nuevos. |
+| **URLs** | todo bajo el prefijo que elijas. Sin colisión. |
+| **Coste Render** | un Background Worker nuevo (~$7/mes; Render no tiene worker gratuito). |
+| **Aislamiento** | el worker es un proceso aparte: si revienta, tu web sigue sirviendo. |
+
+Crecimiento de datos: como mucho ~14 alertas al día, pero `ScanRun` registra
+cada pasada — con `--interval 10` son ~8.600 filas diarias. Conviene purgarla
+periódicamente (ver el final del documento).
+
+## 0.1 Requisitos
 
 - Python **3.12+** en el proyecto anfitrión (lo exige la librería `thetadata`).
   En Render: variable `PYTHON_VERSION=3.12.7` o un `runtime.txt`.
@@ -75,21 +94,34 @@ POWERTRADEAI = {
     "ALPACA_FEED": "iex",
 }
 
+```
+
+### Si tu proyecto YA usa DRF: no toques `REST_FRAMEWORK`
+
+**No añadas ningún bloque `REST_FRAMEWORK`.** Es configuración global: pegarlo
+encima de la tuya cambiaría la autenticación y los permisos por defecto de
+*todos* tus endpoints, y podrías cerrar los que hoy son públicos.
+
+No hace falta. Los viewsets de la app declaran su propia
+`authentication_classes` y `permission_classes` por clase, así que funcionan
+sea cual sea tu configuración global. Está verificado en
+`tests/test_drf_independence.py`, incluida la comprobación de que un
+`AllowAny` global **no** abre las alertas.
+
+### Si tu proyecto NO usa DRF
+
+Añade `"rest_framework"` a `INSTALLED_APPS` y, opcionalmente, paginación:
+
+```python
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": [
-        "powerTradeAi_djangoApp.auth.ApiKeyAuthentication",
-    ],
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticated",
-    ],
     "DEFAULT_PAGINATION_CLASS":
         "rest_framework.pagination.LimitOffsetPagination",
     "PAGE_SIZE": 100,
 }
 ```
 
-Si tu proyecto ya define `REST_FRAMEWORK`, integra las clases en lugar de
-sustituir el bloque.
+La app tolera tenerla o no: sus endpoints devuelven lista plana sin paginación
+y objeto con `results` con ella.
 
 ## 4. urls.py
 
@@ -176,3 +208,22 @@ objetivo de los próximos 2-3 meses es muestra forward, no operar.
 **No mezclar con replays.** Si reconstruyes sesiones pasadas con `replay_day`,
 quedan como `source=replay` y no contaminan los agregados. El endpoint de
 performance rechaza mezclarlas por diseño.
+
+**Purgar `ScanRun`.** Con `--interval 10` son ~8.600 filas al día. Sirve para
+distinguir "no hubo señal" de "el worker estaba caído", pero pasado un mes ya no
+aporta. Un cron mensual en Render, o a mano:
+
+```python
+from datetime import timedelta
+from django.utils import timezone
+from powerTradeAi_djangoApp.models import ScanRun
+
+ScanRun.objects.filter(
+    started_at__lt=timezone.now() - timedelta(days=30), ok=True
+).delete()   # conserva los fallos, que son los que interesa revisar
+```
+
+**Fijar versión en producción.** Usa un tag (`@v1.0.0`), no `@main`. El valor de
+esto es la muestra forward, y solo es limpia si las reglas no cambian mientras
+se genera. Con `@main`, cualquier push altera el comportamiento del worker en el
+siguiente deploy sin dejar rastro de cuándo.
