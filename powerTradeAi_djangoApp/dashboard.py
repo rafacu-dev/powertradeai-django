@@ -161,8 +161,20 @@ def chart_data(request):
 
     MA_PERIODS = [9, 20, 50, 100, 200]
 
-    bars_15m = provider.bars(symbol, end - timedelta(days=ma_lookback), end, "15m")
-    bars_1h = provider.bars(symbol, htf_start, end, "1h")
+    from zoneinfo import ZoneInfo
+    NY = ZoneInfo("America/New_York")
+
+    def rth_filter(df):
+        """Keep only Regular Trading Hours bars (9:30–16:00 ET)."""
+        if df.empty:
+            return df
+        ny_idx = df.index.tz_convert(NY)
+        mask = (ny_idx.time >= datetime(2000, 1, 1, 9, 30).time()) & \
+               (ny_idx.time < datetime(2000, 1, 1, 16, 0).time())
+        return df[mask]
+
+    bars_15m = rth_filter(provider.bars(symbol, end - timedelta(days=ma_lookback), end, "15m"))
+    bars_1h = rth_filter(provider.bars(symbol, htf_start, end, "1h"))
     bars_1d = provider.bars(symbol, htf_start, end, "1d")
     bars_1w = provider.bars(symbol, htf_start, end, "1w")
 
