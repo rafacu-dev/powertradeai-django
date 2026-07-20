@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "powertradeai-django"
+version = "1.0.0"
+description = "App de Django que escanea el mercado, evalua las estrategias del proyecto y registra alertas con su P&L."
+requires-python = ">=3.12"
+dependencies = [
+    "django>=5.0",
+    "djangorestframework>=3.15",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    # Libreria cloud v3: se conecta directo a los servidores de ThetaData,
+    # sin Theta Terminal. Es la que sirve las quotes de opciones.
+    "thetadata>=1.0.9",
+    # Subyacente (velas, precio, tape). El feed IEX es el que valido las
+    # reglas en research/: no cambiarlo sin releer el README de la app.
+    "alpaca-py>=0.43",
+]
+
+[tool.setuptools]
+# Solo la app: el resto del repo (research/, paper/, etc.) no se empaqueta.
+packages = { find = { include = ["powerTradeAi_djangoApp*"] } }

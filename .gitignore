@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+.venv/
+venv/
+env/
+
+# Base de datos local de dev_project
+*.sqlite3
+
+# Credenciales: nunca al repo
+.env
+.env.*
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+.DS_Store
+.idea/
+.vscode/
