@@ -27,7 +27,7 @@ NY = ZoneInfo("America/New_York")
 # Timeframes canonicos -> (cantidad, unidad de alpaca-py).
 _ALPACA_TIMEFRAME = {
     "1m": (1, "Minute"), "15m": (15, "Minute"),
-    "1h": (1, "Hour"), "1d": (1, "Day"),
+    "1h": (1, "Hour"), "1d": (1, "Day"), "1w": (1, "Week"),
 }
 
 

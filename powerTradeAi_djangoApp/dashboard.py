@@ -16,6 +16,8 @@ from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_GET, require_POST
 
+import json
+
 from .models import Alert, Strategy
 
 log = logging.getLogger(__name__)
@@ -122,4 +124,96 @@ def replay_action(request):
         "closed": len(result.closed),
         "net": str(result.net_total),
         "errors": [{"rule": s, "detail": d} for s, d in result.errors],
+    })
+
+
+# ── Chart view ──────────────────────────────────────────────────────
+
+@staff_member_required
+@require_GET
+def chart_view(request):
+    return render(request, "powertradeai/chart.html")
+
+
+@staff_member_required
+@require_GET
+def chart_data(request):
+    """Return 15m candles + MA values for all timeframes."""
+    import numpy as np
+    import pandas as pd
+
+    symbol = request.GET.get("symbol", "SPY").upper()
+    days_back = min(int(request.GET.get("days", "10")), 60)
+
+    from django.conf import settings
+    from .data.alpaca_provider import AlpacaProvider
+
+    cfg = getattr(settings, "POWERTRADEAI", {})
+    provider = AlpacaProvider(
+        api_key=cfg.get("ALPACA_API_KEY"),
+        api_secret=cfg.get("ALPACA_API_SECRET"),
+        feed=cfg.get("ALPACA_FEED", "iex"),
+    )
+
+    end = datetime.now().date()
+    ma_lookback = max(days_back + 5, 25)
+    htf_start = end - timedelta(days=400)
+
+    MA_PERIODS = [9, 20, 50, 100, 200]
+
+    bars_15m = provider.bars(symbol, end - timedelta(days=ma_lookback), end, "15m")
+    bars_1h = provider.bars(symbol, htf_start, end, "1h")
+    bars_1d = provider.bars(symbol, htf_start, end, "1d")
+    bars_1w = provider.bars(symbol, htf_start, end, "1w")
+
+    def to_candles(df):
+        records = []
+        for ts, row in df.iterrows():
+            records.append({
+                "time": int(ts.timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            })
+        return records
+
+    def compute_ma_series(df, period):
+        closes = df["close"].rolling(period).mean()
+        series = []
+        for ts, val in closes.items():
+            if pd.notna(val):
+                series.append({"time": int(ts.timestamp()), "value": round(float(val), 2)})
+        return series
+
+    def current_ma(df, period):
+        closes = df["close"]
+        if len(closes) < period:
+            return None
+        return round(float(closes.iloc[-period:].mean()), 2)
+
+    display_start = end - timedelta(days=days_back + 5)
+    display_ts = int(datetime.combine(display_start, datetime.min.time()).timestamp())
+
+    candles = [c for c in to_candles(bars_15m) if c["time"] >= display_ts]
+
+    ma_curves = {}
+    for p in MA_PERIODS:
+        all_pts = compute_ma_series(bars_15m, p)
+        ma_curves[str(p)] = [pt for pt in all_pts if pt["time"] >= display_ts]
+
+    htf_lines = {}
+    for tf_name, df in [("1h", bars_1h), ("1d", bars_1d), ("1w", bars_1w)]:
+        lines = {}
+        for p in MA_PERIODS:
+            val = current_ma(df, p)
+            if val is not None:
+                lines[str(p)] = val
+        htf_lines[tf_name] = lines
+
+    return JsonResponse({
+        "symbol": symbol,
+        "candles": candles,
+        "ma_curves": ma_curves,
+        "htf_lines": htf_lines,
     })

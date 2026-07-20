@@ -1,0 +1,375 @@
+{% load i18n %}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PowerTradeAI — Chart</title>
+<style>
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --border: #e2e4e9;
+  --text: #1a1d23;
+  --text-2: #5f6370;
+  --text-3: #9194a0;
+  --accent: #3b5bdb;
+  --green: #0ca678;
+  --red: #e03131;
+  --radius: 8px;
+  --chart-bg: #ffffff;
+  --chart-text: #333;
+  --chart-grid: #e2e4e9;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318;
+    --surface: #1a1d24;
+    --border: #2c2f38;
+    --text: #e4e5e9;
+    --text-2: #9194a0;
+    --text-3: #5f6370;
+    --accent: #5c7cfa;
+    --green: #20c997;
+    --red: #ff6b6b;
+    --chart-bg: #1a1d24;
+    --chart-text: #d1d4dc;
+    --chart-grid: #2c2f38;
+  }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.shell {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 16px 20px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+header h1 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+header a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.controls label {
+  font-size: 12px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.controls input, .controls select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.controls input[type="text"] {
+  width: 80px;
+  text-transform: uppercase;
+}
+
+.controls button {
+  padding: 6px 14px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.controls button:hover { opacity: 0.9; }
+
+#chart-container {
+  width: 100%;
+  height: calc(100vh - 140px);
+  min-height: 400px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  position: relative;
+}
+
+.legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.legend span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.legend .dot {
+  width: 10px;
+  height: 3px;
+  border-radius: 1px;
+  display: inline-block;
+}
+
+.loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 14px;
+  z-index: 10;
+}
+
+.htf-legend {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-3);
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.htf-legend strong {
+  color: var(--text-2);
+  font-weight: 600;
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>Chart</h1>
+    <a href="{% url 'powertradeai:dashboard' %}">← Dashboard</a>
+  </header>
+
+  <div class="controls">
+    <label>Ticker</label>
+    <input type="text" id="symbol" value="SPY" maxlength="5">
+    <label>Dias</label>
+    <select id="days">
+      <option value="5">5</option>
+      <option value="10" selected>10</option>
+      <option value="20">20</option>
+      <option value="40">40</option>
+    </select>
+    <button id="load-btn">Cargar</button>
+    <button id="auto-btn" style="background:var(--green)">Live</button>
+    <span id="auto-status" style="font-size:12px;font-weight:600;color:var(--green)">LIVE</span>
+  </div>
+
+  <div id="chart-container">
+    <div class="loading" id="loading">Cargando datos...</div>
+  </div>
+
+  <div class="legend" id="ma-legend"></div>
+  <div class="htf-legend" id="htf-legend"></div>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+const MA_COLORS = {
+  '9':   '#e67700',
+  '20':  '#1c7ed6',
+  '50':  '#ae3ec9',
+  '100': '#2b8a3e',
+  '200': '#e03131',
+};
+
+const HTF_STYLES = {
+  '1h':  { dash: false, width: 1 },
+  '1d':  { dash: true,  width: 2 },
+  '1w':  { dash: true,  width: 2 },
+};
+
+const HTF_LABELS = { '1h': '1H', '1d': 'D', '1w': 'W' };
+
+let chart = null;
+let candleSeries = null;
+let maSeriesMap = {};
+
+function isDark() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+function chartColors() {
+  const dark = isDark();
+  return {
+    bg: dark ? '#1a1d24' : '#ffffff',
+    text: dark ? '#d1d4dc' : '#333333',
+    grid: dark ? '#2c2f38' : '#e2e4e9',
+  };
+}
+
+function createChart() {
+  const container = document.getElementById('chart-container');
+  if (chart) { chart.remove(); chart = null; }
+  maSeriesMap = {};
+
+  const c = chartColors();
+  chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: container.clientHeight,
+    layout: { background: { type: 'solid', color: c.bg }, textColor: c.text },
+    grid: {
+      vertLines: { color: c.grid },
+      horzLines: { color: c.grid },
+    },
+    timeScale: { timeVisible: true, secondsVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#0ca678', downColor: '#e03131',
+    borderUpColor: '#0ca678', borderDownColor: '#e03131',
+    wickUpColor: '#0ca678', wickDownColor: '#e03131',
+  });
+
+  new ResizeObserver(() => {
+    chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+  }).observe(container);
+}
+
+function buildLegend() {
+  const el = document.getElementById('ma-legend');
+  el.innerHTML = '<span style="font-weight:600">15m MAs:</span> ' +
+    Object.entries(MA_COLORS).map(([p, color]) =>
+      `<span><span class="dot" style="background:${color}"></span>MA ${p}</span>`
+    ).join('');
+}
+
+async function loadData() {
+  const symbol = document.getElementById('symbol').value.trim().toUpperCase() || 'SPY';
+  const days = document.getElementById('days').value;
+  const loading = document.getElementById('loading');
+  loading.style.display = 'flex';
+
+  try {
+    const resp = await fetch(`{% url 'powertradeai:chart_data' %}?symbol=${symbol}&days=${days}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+
+    createChart();
+    candleSeries.setData(data.candles);
+
+    for (const [period, series] of Object.entries(data.ma_curves)) {
+      if (!series.length) continue;
+      const lineSeries = chart.addLineSeries({
+        color: MA_COLORS[period] || '#888',
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      lineSeries.setData(series);
+      maSeriesMap[period] = lineSeries;
+    }
+
+    for (const [tf, lines] of Object.entries(data.htf_lines)) {
+      for (const [period, price] of Object.entries(lines)) {
+        candleSeries.createPriceLine({
+          price: price,
+          color: MA_COLORS[period] || '#888',
+          lineWidth: HTF_STYLES[tf]?.width || 1,
+          lineStyle: HTF_STYLES[tf]?.dash
+            ? LightweightCharts.LineStyle.Dashed
+            : LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true,
+          title: `${HTF_LABELS[tf]} MA${period}`,
+        });
+      }
+    }
+
+    chart.timeScale().fitContent();
+
+    const htfEl = document.getElementById('htf-legend');
+    let htfHtml = '';
+    for (const [tf, lines] of Object.entries(data.htf_lines)) {
+      if (!Object.keys(lines).length) continue;
+      const style = HTF_STYLES[tf]?.dash ? 'dashed' : 'solid';
+      const entries = Object.entries(lines).map(([p, v]) =>
+        `<span style="color:${MA_COLORS[p]}">MA${p}: ${v}</span>`
+      ).join(' · ');
+      htfHtml += `<span><strong>${HTF_LABELS[tf]}</strong> (${style}): ${entries}</span>`;
+    }
+    htfEl.innerHTML = htfHtml;
+  } catch (err) {
+    document.getElementById('loading').textContent = 'Error: ' + err.message;
+    document.getElementById('loading').style.display = 'flex';
+    return;
+  } finally {
+    loading.style.display = 'none';
+  }
+}
+
+buildLegend();
+loadData();
+document.getElementById('load-btn').addEventListener('click', loadData);
+document.getElementById('symbol').addEventListener('keydown', e => {
+  if (e.key === 'Enter') loadData();
+});
+
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  loadData();
+});
+
+let autoInterval = null;
+function startAuto() {
+  stopAuto();
+  autoInterval = setInterval(() => loadData(), 60000);
+  document.getElementById('auto-status').textContent = 'LIVE';
+  document.getElementById('auto-status').style.color = 'var(--green)';
+  document.getElementById('auto-btn').textContent = 'Pausar';
+}
+function stopAuto() {
+  if (autoInterval) { clearInterval(autoInterval); autoInterval = null; }
+  document.getElementById('auto-status').textContent = 'PAUSA';
+  document.getElementById('auto-status').style.color = 'var(--text-3)';
+  document.getElementById('auto-btn').textContent = 'Live';
+}
+document.getElementById('auto-btn').addEventListener('click', () => {
+  autoInterval ? stopAuto() : startAuto();
+});
+startAuto();
+</script>
+</body>
+</html>
