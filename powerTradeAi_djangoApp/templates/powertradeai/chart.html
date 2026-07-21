@@ -234,6 +234,7 @@ let bbSeries = {};
 let bbFill = null;
 let priceLines = [];
 let currentSymbol = null;
+let lastCandle = null;
 
 function isDark() {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -391,6 +392,7 @@ async function loadData() {
     const savedRange = rebuild ? null : chart.timeScale().getVisibleLogicalRange();
 
     candleSeries.setData(data.candles);
+    lastCandle = data.candles.length ? {...data.candles[data.candles.length - 1]} : null;
 
     for (const period of Object.keys(MA_COLORS)) {
       maSeriesMap[period].setData(data.ma_curves[period] || []);
@@ -475,16 +477,46 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
   loadData();
 });
 
+// Dos ritmos: refresco completo (60s, pesado: 4 timeframes) y precio en
+// vivo (5s, 1 sola llamada) que "respira" la ultima vela sin recargar todo.
+const FULL_REFRESH_MS = 60000;
+const PRICE_POLL_MS = 5000;
+
 let autoInterval = null;
+let priceInterval = null;
+
+async function pollPrice() {
+  if (!lastCandle || !candleSeries) return;
+  const symbol = document.getElementById('symbol').value.trim().toUpperCase() || 'SPY';
+  try {
+    const resp = await fetch(`{% url 'powertradeai:chart_price' %}?symbol=${symbol}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    if (d.price == null) return;
+    // Actualiza el cierre (y extremos) de la ultima vela con el precio nuevo.
+    lastCandle = {
+      ...lastCandle,
+      close: d.price,
+      high: Math.max(lastCandle.high, d.price),
+      low: Math.min(lastCandle.low, d.price),
+    };
+    candleSeries.update(lastCandle);
+    document.getElementById('last-update').textContent =
+      'Precio ' + d.price.toFixed(2) + ' · ' + new Date().toLocaleTimeString();
+  } catch (e) { /* silencioso: un fallo de red no debe romper el poll */ }
+}
+
 function startAuto() {
   stopAuto();
-  autoInterval = setInterval(() => loadData(), 60000);
+  autoInterval = setInterval(() => loadData(), FULL_REFRESH_MS);
+  priceInterval = setInterval(() => pollPrice(), PRICE_POLL_MS);
   document.getElementById('auto-status').textContent = 'LIVE';
   document.getElementById('auto-status').style.color = 'var(--green)';
   document.getElementById('auto-btn').textContent = 'Pausar';
 }
 function stopAuto() {
   if (autoInterval) { clearInterval(autoInterval); autoInterval = null; }
+  if (priceInterval) { clearInterval(priceInterval); priceInterval = null; }
   document.getElementById('auto-status').textContent = 'PAUSA';
   document.getElementById('auto-status').style.color = 'var(--text-3)';
   document.getElementById('auto-btn').textContent = 'Live';

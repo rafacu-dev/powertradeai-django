@@ -137,6 +137,27 @@ def chart_view(request):
 
 @staff_member_required
 @require_GET
+def chart_price(request):
+    """Ultimo precio del ticker (1 sola llamada, para el poll rapido)."""
+    from django.conf import settings
+    from .data.alpaca_provider import AlpacaProvider
+
+    symbol = request.GET.get("symbol", "SPY").upper()
+    cfg = getattr(settings, "POWERTRADEAI", {})
+    provider = AlpacaProvider(
+        api_key=cfg.get("ALPACA_API_KEY"),
+        api_secret=cfg.get("ALPACA_API_SECRET"),
+        feed=cfg.get("ALPACA_FEED", "iex"),
+    )
+    try:
+        price = float(provider.latest_price(symbol))
+    except Exception as exc:
+        return JsonResponse({"error": str(exc)}, status=502)
+    return JsonResponse({"symbol": symbol, "price": round(price, 2)})
+
+
+@staff_member_required
+@require_GET
 def chart_data(request):
     """Return 15m candles + MA values for all timeframes."""
     import numpy as np
