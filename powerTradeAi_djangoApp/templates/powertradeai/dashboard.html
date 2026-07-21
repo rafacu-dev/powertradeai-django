@@ -154,6 +154,10 @@ header h1 span {
 .scanner tbody tr:last-child { border-bottom: none; }
 .scanner tr.hit-up { background: var(--green-bg); }
 .scanner tr.hit-down { background: var(--red-bg); }
+.scanner tr.hit-counter {
+  background: var(--amber-bg);
+  box-shadow: inset 3px 0 0 var(--amber);
+}
 .badge-scan {
   display: inline-block; padding: 2px 8px; border-radius: 20px;
   font-size: 11px; font-weight: 600;
@@ -381,7 +385,7 @@ tbody tr:hover { background: var(--bg); }
   <div class="scanner-head">
     <div>
       <span class="scanner-title">Scanner de apertura</span>
-      <span class="scanner-sub">Bollinger diario (20,2) vs apertura de hoy</span>
+      <span class="scanner-sub">Bollinger 15m (20,2) vs apertura · pesa contra-tendencia (MA20/MA40)</span>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <span class="scanner-status" id="scanner-status"></span>
@@ -558,20 +562,43 @@ async function loadScanner() {
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
 
+    const TREND = {
+      alcista: '▲ Alcista',
+      bajista: '▼ Bajista',
+      plano:   '— Plano',
+    };
+
     let rows = '';
     for (const r of data.rows) {
       if (!r.status || r.status === 'ERROR' || r.status === 'SIN_DATOS') {
         rows += `<tr><td class="sym">${r.symbol}</td>` +
-          `<td colspan="6" style="text-align:left;color:var(--text-3)">` +
+          `<td colspan="8" style="text-align:left;color:var(--text-3)">` +
           `${r.status === 'ERROR' ? 'error' : 'sin datos'}</td></tr>`;
         continue;
       }
       const s = SCAN_STATUS[r.status] || SCAN_STATUS.DENTRO;
+      const outside = r.status === 'FUERA_ARRIBA' || r.status === 'FUERA_ABAJO';
       const openTxt = r.open != null ? r.open.toFixed(2) : '&mdash;';
       const zTxt = r.z != null ? (r.z > 0 ? '+' : '') + r.z.toFixed(2) : '&mdash;';
-      rows += `<tr class="${s.row}">` +
+      const trendCls = r.trend === 'alcista' ? 'up'
+        : r.trend === 'bajista' ? 'down' : 'inside';
+
+      // Tipo: contra-tendencia (lo que buscamos) vs a favor.
+      let tipo = '&mdash;';
+      if (outside) {
+        tipo = r.counter_trend
+          ? '<span class="badge-scan up">Contra-tend.</span>'
+          : '<span class="badge-scan inside">A favor</span>';
+      }
+      const scoreTxt = (outside && r.score) ? r.score.toFixed(2) : '&mdash;';
+      const rowCls = r.counter_trend ? 'hit-counter' : s.row;
+
+      rows += `<tr class="${rowCls}">` +
         `<td class="sym">${r.symbol}</td>` +
         `<td><span class="badge-scan ${s.cls}">${s.label}</span></td>` +
+        `<td><span class="badge-scan ${trendCls}">${TREND[r.trend] || r.trend}</span></td>` +
+        `<td>${tipo}</td>` +
+        `<td><strong>${scoreTxt}</strong></td>` +
         `<td>${r.lower.toFixed(2)}</td>` +
         `<td style="color:var(--text-3)">${r.middle.toFixed(2)}</td>` +
         `<td>${r.upper.toFixed(2)}</td>` +
@@ -582,13 +609,15 @@ async function loadScanner() {
 
     body.innerHTML =
       '<table><thead><tr>' +
-      '<th>Símbolo</th><th>Estado</th><th>Banda inf</th><th>Media</th>' +
-      '<th>Banda sup</th><th>Apertura</th><th>Z</th>' +
+      '<th>Símbolo</th><th>Estado</th><th>Tendencia</th><th>Tipo</th><th>Score</th>' +
+      '<th>Banda inf</th><th>Media</th><th>Banda sup</th><th>Apertura</th><th>Z</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>';
 
+    const counter = data.rows.filter(r => r.counter_trend).length;
     const hits = data.rows.filter(r =>
       r.status === 'FUERA_ARRIBA' || r.status === 'FUERA_ABAJO').length;
-    status.textContent = `${data.date} · ${hits} fuera de banda`;
+    status.textContent =
+      `${data.date} · ${hits} fuera de banda · ${counter} contra-tendencia`;
   } catch (err) {
     document.getElementById('scanner-body').innerHTML =
       `<div class="scanner-empty">Error: ${err.message}</div>`;

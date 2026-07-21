@@ -248,7 +248,7 @@ def chart_data(request):
     })
 
 
-# ── Scanner de apertura vs Bollinger diario ─────────────────────────
+# ── Scanner de apertura: Bollinger 15m + tendencia MA20/MA40 ────────
 
 # 10 mayores del NASDAQ (peso en el Nasdaq-100, mediados de 2026) + indices.
 SCANNER_WATCHLIST = [
@@ -258,17 +258,28 @@ SCANNER_WATCHLIST = [
     "QQQ", "SPY", "DIA",
 ]
 
+BB_PERIOD = 20      # Bollinger sobre velas de 15m (tambien es la MA rapida).
+MA_SLOW = 40        # Media lenta para leer la tendencia.
+BB_K = 2            # Desviaciones estandar de las bandas.
+
 
 @staff_member_required
 @require_GET
 def scanner_data(request):
-    """Bollinger diario (cerrado hasta ayer) vs precio de apertura de hoy.
+    """Bollinger 15m (cerrado hasta ayer) vs apertura de hoy, ponderado por
+    tendencia MA20/MA40.
 
-    El Bollinger diario solo usa cierres ya cerrados, asi que queda fijo
-    antes de la apertura. A las 9:30 comparamos la apertura de hoy contra
-    esas bandas: quien abre fuera es candidato. No se usa premarket.
+    Las bandas y las medias se calculan con velas de 15m RTH ya cerradas
+    (hasta el cierre de ayer), asi que quedan fijas antes de la apertura;
+    no se usa premarket. A las 9:30 comparamos la apertura contra esas
+    bandas.
+
+    Ponderacion: pesa mas la apertura que va EN CONTRA de la tendencia.
+      - Tendencia alcista (MA20 > MA40): pesa mas quien abre por DEBAJO de
+        la banda inferior (retroceso contra-tendencia).
+      - Tendencia bajista (MA40 > MA20): pesa mas quien abre por ENCIMA de
+        la banda superior.
     """
-    import pandas as pd
     from zoneinfo import ZoneInfo
 
     from django.conf import settings
@@ -283,14 +294,15 @@ def scanner_data(request):
         feed=cfg.get("ALPACA_FEED", "iex"),
     )
 
-    period, k = 20, 2
+    open_lo = datetime(2000, 1, 1, 9, 30).time()
+    open_hi = datetime(2000, 1, 1, 16, 0).time()
     today = datetime.now(NY).date()
-    start = today - timedelta(days=60)
+    start = today - timedelta(days=15)   # ~15 dias cubre >40 velas RTH de 15m
 
     rows = []
     for symbol in SCANNER_WATCHLIST:
         try:
-            bars = provider.bars(symbol, start, today, "1d")
+            bars = provider.bars(symbol, start, today, "15m")
         except MarketDataError as exc:
             rows.append({"symbol": symbol, "status": "ERROR", "detail": str(exc)})
             continue
@@ -298,23 +310,43 @@ def scanner_data(request):
             rows.append({"symbol": symbol, "status": "SIN_DATOS"})
             continue
 
-        dates = bars.index.tz_convert(NY).date
-        today_mask = dates == today
-        hist = bars[~today_mask]              # cerrados hasta ayer
-        if len(hist) < period:
+        ny_idx = bars.index.tz_convert(NY)
+        rth = bars[(ny_idx.time >= open_lo) & (ny_idx.time < open_hi)]
+        if rth.empty:
             rows.append({"symbol": symbol, "status": "SIN_DATOS"})
             continue
 
-        closes = hist["close"].iloc[-period:]
-        mid = float(closes.mean())
-        std = float(closes.std(ddof=0))       # poblacional, como TradingView
-        upper = mid + k * std
-        lower = mid - k * std
+        rth_dates = rth.index.tz_convert(NY).date
+        today_mask = rth_dates == today
+        hist = rth[~today_mask]              # velas 15m RTH cerradas hasta ayer
+        if len(hist) < MA_SLOW:
+            rows.append({"symbol": symbol, "status": "SIN_DATOS"})
+            continue
+
+        closes = hist["close"]
+        bb_win = closes.iloc[-BB_PERIOD:]
+        mid = float(bb_win.mean())          # = MA20 (base de Bollinger)
+        std = float(bb_win.std(ddof=0))     # poblacional, como TradingView
+        upper = mid + BB_K * std
+        lower = mid - BB_K * std
+        ma_fast = mid
+        ma_slow = float(closes.iloc[-MA_SLOW:].mean())
+
+        # Tendencia por cruce de medias (con banda muerta de 0.05%).
+        spread = (ma_fast - ma_slow) / ma_slow if ma_slow else 0.0
+        if spread > 0.0005:
+            trend = "alcista"
+        elif spread < -0.0005:
+            trend = "bajista"
+        else:
+            trend = "plano"
 
         today_open = None
         if today_mask.any():
-            today_open = float(bars[today_mask]["open"].iloc[0])
+            today_open = float(rth[today_mask]["open"].iloc[0])
 
+        counter_trend = False
+        score = 0.0
         if today_open is None:
             status = "PENDIENTE"
             z = None
@@ -327,6 +359,16 @@ def scanner_data(request):
             else:
                 status = "DENTRO"
 
+            outside = status in ("FUERA_ARRIBA", "FUERA_ABAJO")
+            if outside:
+                counter_trend = (
+                    (trend == "alcista" and status == "FUERA_ABAJO") or
+                    (trend == "bajista" and status == "FUERA_ARRIBA")
+                )
+                # Contra-tendencia pesa el doble que a favor.
+                weight = 2.0 if counter_trend else 1.0
+                score = abs(z) * weight
+
         rows.append({
             "symbol": symbol,
             "status": status,
@@ -334,20 +376,27 @@ def scanner_data(request):
             "lower": round(lower, 2),
             "middle": round(mid, 2),
             "upper": round(upper, 2),
-            "prev_close": round(float(hist["close"].iloc[-1]), 2),
+            "prev_close": round(float(closes.iloc[-1]), 2),
             "z": round(z, 2) if z is not None else None,
+            "ma20": round(ma_fast, 2),
+            "ma40": round(ma_slow, 2),
+            "trend": trend,
+            "counter_trend": counter_trend,
+            "score": round(score, 2),
         })
 
-    # Los que abrieron fuera primero, luego por |z| descendente.
+    # Mayor score primero (contra-tendencia sube arriba); pendientes al final.
     def sort_key(r):
-        outside = r.get("status") in ("FUERA_ARRIBA", "FUERA_ABAJO")
-        return (0 if outside else 1, -abs(r.get("z") or 0))
+        has_score = r.get("status") in ("FUERA_ARRIBA", "FUERA_ABAJO", "DENTRO")
+        return (0 if has_score else 1, -(r.get("score") or 0), -abs(r.get("z") or 0))
 
     rows.sort(key=sort_key)
 
     return JsonResponse({
         "date": str(today),
-        "period": period,
-        "k": k,
+        "timeframe": "15m",
+        "bb_period": BB_PERIOD,
+        "ma_slow": MA_SLOW,
+        "k": BB_K,
         "rows": rows,
     })
