@@ -367,6 +367,18 @@ def scanner_data(request):
         if today_mask.any():
             today_open = float(rth[today_mask]["open"].iloc[0])
 
+        # Precio a mostrar: la apertura si ya abrio; si no (premarket), el
+        # ultimo precio en vivo para ir observando (fallback: ultimo cierre).
+        if today_open is not None:
+            price = today_open
+            is_open = True
+        else:
+            is_open = False
+            try:
+                price = float(provider.latest_price(symbol))
+            except Exception:
+                price = float(closes.iloc[-1])
+
         counter_trend = False
         score = 0.0
         if today_open is None:
@@ -394,6 +406,8 @@ def scanner_data(request):
         rows.append({
             "symbol": symbol,
             "status": status,
+            "price": round(price, 2),
+            "is_open": is_open,
             "open": round(today_open, 2) if today_open is not None else None,
             "lower": round(lower, 2),
             "middle": round(mid, 2),

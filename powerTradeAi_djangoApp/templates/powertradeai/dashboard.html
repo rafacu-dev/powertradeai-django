@@ -580,8 +580,15 @@ async function loadScanner() {
       }
       const s = SCAN_STATUS[r.status] || SCAN_STATUS.DENTRO;
       const outside = r.status === 'FUERA_ARRIBA' || r.status === 'FUERA_ABAJO';
-      const openTxt = r.open != null ? r.open.toFixed(2) : '&mdash;';
       const zTxt = r.z != null ? (r.z > 0 ? '+' : '') + r.z.toFixed(2) : '&mdash;';
+
+      // Precio: gris en premarket; blanco dentro de banda; verde si abrio
+      // bajo la banda inferior; rojo si abrio sobre la superior.
+      let priceColor = 'var(--text)';
+      if (!r.is_open) priceColor = 'var(--text-3)';
+      else if (r.status === 'FUERA_ABAJO') priceColor = 'var(--green)';
+      else if (r.status === 'FUERA_ARRIBA') priceColor = 'var(--red)';
+      const priceTxt = r.price != null ? r.price.toFixed(2) : '&mdash;';
       const trendCls = r.trend === 'alcista' ? 'up'
         : r.trend === 'bajista' ? 'down' : 'inside';
 
@@ -604,7 +611,7 @@ async function loadScanner() {
         `<td>${r.lower.toFixed(2)}</td>` +
         `<td style="color:var(--text-3)">${r.middle.toFixed(2)}</td>` +
         `<td>${r.upper.toFixed(2)}</td>` +
-        `<td><strong>${openTxt}</strong></td>` +
+        `<td><strong style="color:${priceColor}">${priceTxt}</strong></td>` +
         `<td>${zTxt}</td>` +
         `</tr>`;
     }
@@ -612,7 +619,7 @@ async function loadScanner() {
     body.innerHTML =
       '<table><thead><tr>' +
       '<th>Símbolo</th><th>Estado</th><th>Tendencia</th><th>Tipo</th><th>Score</th>' +
-      '<th>Banda inf</th><th>Media</th><th>Banda sup</th><th>Apertura</th><th>Z</th>' +
+      '<th>Banda inf</th><th>Media</th><th>Banda sup</th><th>Precio</th><th>Z</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>';
 
     const counter = data.rows.filter(r => r.counter_trend).length;
