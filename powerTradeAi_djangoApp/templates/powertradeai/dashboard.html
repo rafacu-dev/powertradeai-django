@@ -150,6 +150,8 @@ header h1 span {
 }
 .scanner th:first-child, .scanner td:first-child { text-align: left; }
 .scanner td.sym { font-weight: 600; }
+.scanner td.sym a { color: var(--accent); text-decoration: none; }
+.scanner td.sym a:hover { text-decoration: underline; }
 .scanner tbody tr { border-bottom: 1px solid var(--border); }
 .scanner tbody tr:last-child { border-bottom: none; }
 .scanner tr.hit-up { background: var(--green-bg); }
@@ -594,7 +596,7 @@ async function loadScanner() {
       const rowCls = r.counter_trend ? 'hit-counter' : s.row;
 
       rows += `<tr class="${rowCls}">` +
-        `<td class="sym">${r.symbol}</td>` +
+        `<td class="sym"><a href="{% url 'powertradeai:chart' %}?symbol=${r.symbol}">${r.symbol}</a></td>` +
         `<td><span class="badge-scan ${s.cls}">${s.label}</span></td>` +
         `<td><span class="badge-scan ${trendCls}">${TREND[r.trend] || r.trend}</span></td>` +
         `<td>${tipo}</td>` +

@@ -460,6 +460,10 @@ async function loadData() {
   }
 }
 
+// Prefill del ticker desde la URL (?symbol=XXX), para llegar desde el scanner.
+const urlSymbol = new URLSearchParams(location.search).get('symbol');
+if (urlSymbol) document.getElementById('symbol').value = urlSymbol.toUpperCase();
+
 buildLegend();
 loadData();
 document.getElementById('load-btn').addEventListener('click', loadData);
