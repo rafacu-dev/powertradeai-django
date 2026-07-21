@@ -166,6 +166,12 @@ header h1 span {
 }
 .dot-price.green { background: var(--green); }
 .dot-price.red { background: var(--red); }
+.scanner td.tv-cell { text-align: center; }
+.tv-link {
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-3); transition: color 0.15s;
+}
+.tv-link:hover { color: var(--accent); }
 .badge-scan {
   display: inline-block; padding: 2px 8px; border-radius: 20px;
   font-size: 11px; font-weight: 600;
@@ -580,7 +586,7 @@ async function loadScanner() {
     for (const r of data.rows) {
       if (!r.status || r.status === 'ERROR' || r.status === 'SIN_DATOS') {
         rows += `<tr><td class="sym">${r.symbol}</td>` +
-          `<td colspan="8" style="text-align:left;color:var(--text-3)">` +
+          `<td colspan="10" style="text-align:left;color:var(--text-3)">` +
           `${r.status === 'ERROR' ? 'error' : 'sin datos'}</td></tr>`;
         continue;
       }
@@ -624,13 +630,20 @@ async function loadScanner() {
         `<td>${r.upper.toFixed(2)}</td>` +
         `<td>${dot}<strong style="color:${priceColor}">${priceTxt}</strong></td>` +
         `<td>${zTxt}</td>` +
+        `<td class="tv-cell"><a class="tv-link" title="Abrir en TradingView" ` +
+          `href="https://www.tradingview.com/chart/?symbol=${r.symbol}" ` +
+          `target="_blank" rel="noopener">` +
+          `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" ` +
+          `stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
+          `stroke-linejoin="round"><path d="M3 3v18h18"/>` +
+          `<path d="M7 14l4-4 3 3 5-6"/></svg></a></td>` +
         `</tr>`;
     }
 
     body.innerHTML =
       '<table><thead><tr>' +
       '<th>Símbolo</th><th>Estado</th><th>Tendencia</th><th>Tipo</th><th>Score</th>' +
-      '<th>Banda inf</th><th>Media</th><th>Banda sup</th><th>Precio</th><th>Z</th>' +
+      '<th>Banda inf</th><th>Media</th><th>Banda sup</th><th>Precio</th><th>Z</th><th></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>';
 
     const counter = data.rows.filter(r => r.counter_trend).length;
