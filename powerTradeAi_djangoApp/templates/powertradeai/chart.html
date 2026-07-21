@@ -235,6 +235,8 @@ let bbFill = null;
 let priceLines = [];
 let currentSymbol = null;
 let lastCandle = null;
+let liveCloses = [];   // cierres del 15m visibles, para recalcular en local
+let bbFillPts = [];    // puntos del relleno de Bollinger (upper/lower)
 
 function isDark() {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -393,6 +395,7 @@ async function loadData() {
 
     candleSeries.setData(data.candles);
     lastCandle = data.candles.length ? {...data.candles[data.candles.length - 1]} : null;
+    liveCloses = data.candles.map(c => c.close);
 
     for (const period of Object.keys(MA_COLORS)) {
       maSeriesMap[period].setData(data.ma_curves[period] || []);
@@ -406,10 +409,10 @@ async function loadData() {
     // Alimentar el relleno: combinar upper/lower por timestamp.
     const lowerByTime = {};
     for (const p of (bb.lower || [])) lowerByTime[p.time] = p.value;
-    const fillPts = (bb.upper || [])
+    bbFillPts = (bb.upper || [])
       .filter(p => lowerByTime[p.time] != null)
       .map(p => ({ time: p.time, upper: p.value, lower: lowerByTime[p.time] }));
-    if (bbFill) bbFill.setData(fillPts);
+    if (bbFill) bbFill.setData(bbFillPts);
 
     // Higher-timeframe MAs as horizontal price lines: clear and redraw.
     for (const pl of priceLines) candleSeries.removePriceLine(pl);
@@ -501,9 +504,47 @@ async function pollPrice() {
       low: Math.min(lastCandle.low, d.price),
     };
     candleSeries.update(lastCandle);
+    recomputeLive();   // MAs y Bollinger del ultimo punto, en local (sin red)
     document.getElementById('last-update').textContent =
       'Precio ' + d.price.toFixed(2) + ' · ' + new Date().toLocaleTimeString();
   } catch (e) { /* silencioso: un fallo de red no debe romper el poll */ }
+}
+
+// Recalcula SOLO el ultimo punto de las medias y las bandas con el precio en
+// vivo, usando los cierres ya cargados. No pide nada a la red.
+function recomputeLive() {
+  if (!lastCandle || liveCloses.length < 2) return;
+  const t = lastCandle.time;
+  const n = liveCloses.length;
+  liveCloses[n - 1] = lastCandle.close;   // el ultimo cierre es el precio vivo
+
+  const meanLast = (P) => {
+    let sum = 0;
+    for (let i = n - P; i < n; i++) sum += liveCloses[i];
+    return sum / P;
+  };
+
+  for (const p of Object.keys(MA_COLORS)) {
+    const P = +p;
+    if (n >= P) maSeriesMap[p].update({ time: t, value: +meanLast(P).toFixed(2) });
+  }
+
+  const P = 20;   // Bollinger (20, 2)
+  if (n >= P) {
+    const mid = meanLast(P);
+    let vs = 0;
+    for (let i = n - P; i < n; i++) { const dv = liveCloses[i] - mid; vs += dv * dv; }
+    const std = Math.sqrt(vs / P);
+    const up = +(mid + 2 * std).toFixed(2);
+    const lo = +(mid - 2 * std).toFixed(2);
+    bbSeries.upper.update({ time: t, value: up });
+    bbSeries.middle.update({ time: t, value: +mid.toFixed(2) });
+    bbSeries.lower.update({ time: t, value: lo });
+    if (bbFill && bbFillPts.length) {
+      bbFillPts[bbFillPts.length - 1] = { time: t, upper: up, lower: lo };
+      bbFill.setData(bbFillPts);
+    }
+  }
 }
 
 function startAuto() {
