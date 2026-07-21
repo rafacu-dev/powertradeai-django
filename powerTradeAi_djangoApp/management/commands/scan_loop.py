@@ -32,6 +32,14 @@ class Command(BaseCommand):
         parser.add_argument(
             "--ignore-market-hours", action="store_true",
             help="Escanea aunque el mercado este cerrado.")
+        # Piloto automatico del agente EN EL MISMO worker (sin gasto extra).
+        parser.add_argument(
+            "--agent", action="store_true",
+            help="Ademas del scanner, corre el agente autonomo en este proceso.")
+        parser.add_argument("--agent-symbols", type=str, default="TSLA")
+        parser.add_argument("--agent-interval", type=int, default=1800)
+        parser.add_argument("--agent-move-threshold", type=float, default=0.7)
+        parser.add_argument("--agent-min-gap", type=int, default=600)
 
     def handle(self, *args, **options):
         interval = options["interval"]
@@ -41,6 +49,24 @@ class Command(BaseCommand):
             run = scan_once()
             self._report(run)
             return
+
+        # Configurar el piloto del agente si se pidio.
+        autopilot = None
+        provider = None
+        if options["agent"]:
+            from ...agent.autopilot import AgentAutopilot
+            from ...data import get_provider
+            symbols = [s.strip().upper()
+                       for s in options["agent_symbols"].split(",") if s.strip()]
+            autopilot = AgentAutopilot(
+                symbols, interval=options["agent_interval"],
+                move_threshold=options["agent_move_threshold"],
+                min_gap=options["agent_min_gap"])
+            provider = get_provider()
+            self.stdout.write(self.style.SUCCESS(
+                f"agente ON en este worker · {', '.join(symbols)} · "
+                f"periodico {options['agent_interval']}s · evento "
+                f"{options['agent_move_threshold']}%"))
 
         stopping = {"now": False}
 
@@ -68,6 +94,17 @@ class Command(BaseCommand):
 
             run = scan_once()
             self._report(run)
+
+            # Piloto del agente: comparte el proceso. Sus tiradas estan
+            # limitadas por min_gap, asi que solo corre de vez en cuando y no
+            # frena al scanner en cada pasada.
+            if autopilot is not None:
+                try:
+                    for sym, msg in autopilot.tick(provider):
+                        self.stdout.write(f"[{now_ny():%H:%M:%S}] agente {sym} {msg}")
+                except Exception:  # noqa: BLE001
+                    log.exception("fallo el tick del agente")
+
             # Aunque el scan falle, seguimos: un fallo de red no debe tumbar
             # el worker y dejar alertas vivas sin resolver.
             self._sleep(interval, stopping)
