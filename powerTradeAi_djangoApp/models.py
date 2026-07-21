@@ -333,3 +333,23 @@ class AgentAnalysis(models.Model):
 
     def __str__(self) -> str:
         return f"{self.symbol} {self.created_at:%Y-%m-%d %H:%M} ({self.stance})"
+
+
+class AgentNote(models.Model):
+    """Nota libre del agente: ideas, patrones observados, reglas que quiere
+    recordar. A diferencia de AgentAnalysis (atada a un activo y a un sesgo),
+    esto es su cuaderno de day-trader, indexado por tema."""
+
+    topic = models.CharField(max_length=80, db_index=True)
+    note = models.TextField()
+    agent_run = models.ForeignKey(
+        AgentRun, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="notes")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["topic", "-created_at"])]
+
+    def __str__(self) -> str:
+        return f"[{self.topic}] {self.note[:40]}"

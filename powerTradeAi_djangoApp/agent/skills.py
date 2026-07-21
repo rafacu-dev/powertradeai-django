@@ -324,3 +324,233 @@ def create_alert(ctx, symbol: str, direction: str, thesis: str):
     )
     return {"alert_id": alert.id, "created": created,
             "symbol": sym, "direction": direction}
+
+
+# ── Skills de day-trader: indicadores, historicos, backtest, notas ──
+
+def _rsi(closes, period: int = 14) -> float | None:
+    if len(closes) < period + 1:
+        return None
+    delta = closes.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, float("nan"))
+    rsi = 100 - 100 / (1 + rs)
+    val = rsi.iloc[-1]
+    return round(float(val), 1) if val == val else None  # nan check
+
+
+@skill(
+    "get_intraday_stats",
+    "Radar intradia del activo: apertura, precio actual, rango del dia y donde "
+    "esta dentro de el, gap contra el cierre previo, VWAP, ATR(14) diario y "
+    "RSI(14) en 15m. Lo esencial para decidir de day-trader.",
+    {
+        "type": "object",
+        "properties": {"symbol": {"type": "string"}},
+        "required": ["symbol"],
+    },
+)
+def get_intraday_stats(ctx, symbol: str):
+    import pandas as pd  # noqa: F401
+    provider = _provider()
+    sym = symbol.upper()
+    end = datetime.now(NY).date()
+
+    daily = provider.bars(sym, end - timedelta(days=40), end, "1d")
+    if daily.empty:
+        return {"symbol": sym, "error": "sin datos diarios"}
+    ddates = daily.index.tz_convert(NY).date
+    today_daily = daily[ddates == end]
+    prev = daily[ddates < end]
+    prev_close = float(prev["close"].iloc[-1]) if not prev.empty else None
+
+    # ATR(14) diario.
+    atr = None
+    if len(daily) >= 15:
+        h, l, c = daily["high"], daily["low"], daily["close"]
+        pc = c.shift(1)
+        tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+        atr = round(float(tr.rolling(14).mean().iloc[-1]), 2)
+
+    bars15 = provider.bars(sym, end - timedelta(days=5), end, "15m")
+    ny = bars15.index.tz_convert(NY)
+    today15 = bars15[(ny.date == end) &
+                     (ny.time >= datetime(2000, 1, 1, 9, 30).time())]
+    try:
+        price = float(provider.latest_price(sym))
+    except Exception:
+        price = float(bars15["close"].iloc[-1]) if not bars15.empty else None
+
+    out = {"symbol": sym, "price": round(price, 2) if price else None,
+           "prev_close": round(prev_close, 2) if prev_close else None,
+           "atr14_daily": atr, "rsi14_15m": _rsi(bars15["close"]) if not bars15.empty else None}
+
+    if not today15.empty:
+        o = float(today15["open"].iloc[0])
+        hi = float(today15["high"].max())
+        lo = float(today15["low"].min())
+        out["open"] = round(o, 2)
+        out["day_high"] = round(hi, 2)
+        out["day_low"] = round(lo, 2)
+        out["day_range_pct"] = round((hi - lo) / o * 100, 2) if o else None
+        if hi > lo and price:
+            out["pos_in_range_pct"] = round((price - lo) / (hi - lo) * 100, 1)
+        if "volume" in today15:
+            tp = (today15["high"] + today15["low"] + today15["close"]) / 3
+            vol = today15["volume"]
+            if vol.sum() > 0:
+                out["vwap"] = round(float((tp * vol).sum() / vol.sum()), 2)
+        if prev_close and o:
+            out["gap_pct"] = round((o - prev_close) / prev_close * 100, 2)
+    return out
+
+
+@skill(
+    "get_historical_bars",
+    "Historico DIARIO resumido del activo para estudiar su comportamiento: por "
+    "cada dia el OHLC, el rango en %% y el gap de apertura. Util para ver "
+    "patrones y contexto.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "days": {"type": "integer", "description": "Dias hacia atras (max 90)."},
+        },
+        "required": ["symbol"],
+    },
+)
+def get_historical_bars(ctx, symbol: str, days: int = 20):
+    provider = _provider()
+    sym = symbol.upper()
+    end = datetime.now(NY).date()
+    daily = provider.bars(sym, end - timedelta(days=min(int(days), 90) + 5), end, "1d")
+    if daily.empty:
+        return {"symbol": sym, "error": "sin datos"}
+    rows, prev_c = [], None
+    for ts, r in daily.tail(min(int(days), 90)).iterrows():
+        o, h, l, c = (float(r["open"]), float(r["high"]),
+                      float(r["low"]), float(r["close"]))
+        rows.append({
+            "date": ts.tz_convert(NY).strftime("%Y-%m-%d"),
+            "o": round(o, 2), "h": round(h, 2), "l": round(l, 2), "c": round(c, 2),
+            "range_pct": round((h - l) / o * 100, 2) if o else None,
+            "gap_pct": round((o - prev_c) / prev_c * 100, 2) if prev_c else None,
+        })
+        prev_c = c
+    return {"symbol": sym, "days": len(rows), "bars": rows}
+
+
+@skill(
+    "backtest_reversion",
+    "Backtest simple de reversion con Bollinger en velas de 15m: entra cuando "
+    "el cierre perfora la banda (inferior=long, superior=short) y sale al "
+    "volver a la media o tras un maximo de velas. Devuelve n, aciertos y "
+    "retorno medio del SUBYACENTE (no de opciones). Es orientativo.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "days": {"type": "integer", "description": "Dias a testear (max 30)."},
+            "max_hold_bars": {"type": "integer",
+                              "description": "Maximo de velas 15m en la posicion."},
+        },
+        "required": ["symbol"],
+    },
+)
+def backtest_reversion(ctx, symbol: str, days: int = 15, max_hold_bars: int = 8):
+    provider = _provider()
+    sym = symbol.upper()
+    end = datetime.now(NY).date()
+    bars = provider.bars(sym, end - timedelta(days=min(int(days), 30) + 5), end, "15m")
+    ny = bars.index.tz_convert(NY)
+    rth = bars[(ny.time >= datetime(2000, 1, 1, 9, 30).time()) &
+               (ny.time < datetime(2000, 1, 1, 16, 0).time())]
+    closes = rth["close"].reset_index(drop=True)
+    if len(closes) < 40:
+        return {"symbol": sym, "error": "pocas velas"}
+    period, k = 20, 2
+    mid = closes.rolling(period).mean()
+    std = closes.rolling(period).std(ddof=0)
+    upper, lower = mid + k * std, mid - k * std
+
+    trades, i, n = [], period, len(closes)
+    hold = int(max_hold_bars)
+    while i < n - 1:
+        entry = None
+        if closes[i] < lower[i]:
+            entry = ("long", closes[i])
+        elif closes[i] > upper[i]:
+            entry = ("short", closes[i])
+        if not entry:
+            i += 1
+            continue
+        side, px = entry
+        exit_px, j = closes[min(i + hold, n - 1)], i + 1
+        while j <= min(i + hold, n - 1):
+            if side == "long" and closes[j] >= mid[j]:
+                exit_px = closes[j]
+                break
+            if side == "short" and closes[j] <= mid[j]:
+                exit_px = closes[j]
+                break
+            j += 1
+        ret = ((exit_px - px) / px if side == "long"
+               else (px - exit_px) / px) * 100
+        trades.append(round(ret, 3))
+        i = j + 1
+
+    if not trades:
+        return {"symbol": sym, "trades": 0, "note": "sin señales en el periodo"}
+    wins = sum(1 for t in trades if t > 0)
+    return {
+        "symbol": sym, "days": min(int(days), 30), "trades": len(trades),
+        "win_rate_pct": round(wins / len(trades) * 100, 1),
+        "avg_return_pct": round(sum(trades) / len(trades), 3),
+        "best_pct": max(trades), "worst_pct": min(trades),
+        "note": "retorno del subyacente, orientativo; no incluye opciones ni costes",
+    }
+
+
+@skill(
+    "save_note",
+    "Guarda una nota en tu cuaderno de day-trader (ideas, patrones, reglas que "
+    "quieres recordar), indexada por tema. Persiste entre corridas.",
+    {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string", "description": "Tema, p.ej. 'TSLA' o 'reversion'."},
+            "note": {"type": "string"},
+        },
+        "required": ["topic", "note"],
+    },
+)
+def save_note(ctx, topic: str, note: str):
+    from ..models import AgentNote
+    AgentNote.objects.create(topic=topic.strip()[:80], note=note, agent_run=ctx["run"])
+    return {"saved": True, "topic": topic.strip()[:80]}
+
+
+@skill(
+    "get_notes",
+    "Lee tus notas previas por tema, para no perder tus propias ideas y reglas.",
+    {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string"},
+            "limit": {"type": "integer", "description": "Cuantas (max 10)."},
+        },
+        "required": ["topic"],
+    },
+)
+def get_notes(ctx, topic: str, limit: int = 5):
+    from ..models import AgentNote
+    qs = AgentNote.objects.filter(topic=topic.strip()[:80])[: min(int(limit), 10)]
+    return {
+        "topic": topic.strip()[:80],
+        "notes": [
+            {"when": n.created_at.astimezone(NY).strftime("%Y-%m-%d %H:%M"),
+             "note": n.note}
+            for n in qs
+        ],
+    }
