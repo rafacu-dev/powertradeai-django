@@ -301,12 +301,29 @@ def chart_data(request):
             bb["middle"].append({"time": t, "value": m})
             bb["lower"].append({"time": t, "value": m - s})
 
+    # VWAP de sesion: se reinicia cada dia. Precio tipico ponderado por volumen,
+    # acumulado desde la apertura de cada jornada.
+    vwap = []
+    if "volume" in bars_15m.columns and not bars_15m.empty:
+        tp = (bars_15m["high"] + bars_15m["low"] + bars_15m["close"]) / 3
+        vol = bars_15m["volume"]
+        day = bars_15m.index.tz_convert(NY).date
+        cum_pv = (tp * vol).groupby(day).cumsum()
+        cum_v = vol.groupby(day).cumsum()
+        vw = cum_pv / cum_v.replace(0, np.nan)
+        for ts in bars_15m.index:
+            t = int(ts.timestamp())
+            if t < display_ts or pd.isna(vw[ts]):
+                continue
+            vwap.append({"time": t, "value": round(float(vw[ts]), 2)})
+
     return JsonResponse({
         "symbol": symbol,
         "candles": candles,
         "ma_curves": ma_curves,
         "htf_lines": htf_lines,
         "bollinger": bb,
+        "vwap": vwap,
     })
 
 

@@ -226,12 +226,14 @@ const HTF_LABELS = { '1h': '1H', '1d': 'D', '1w': 'W' };
 
 const BB_COLOR = '#4c8dff';       // linea de las bandas (azul)
 const BB_FILL = 'rgba(76, 141, 255, 0.12)';  // relleno translucido azulito
+const VWAP_COLOR = '#f59f00';     // VWAP en ambar, para distinguirlo de las MAs
 
 let chart = null;
 let candleSeries = null;
 let maSeriesMap = {};
 let bbSeries = {};
 let bbFill = null;
+let vwapSeries = null;
 let priceLines = [];
 let currentSymbol = null;
 let lastCandle = null;
@@ -359,6 +361,13 @@ function createChart() {
     });
   }
 
+  // VWAP de sesion: linea ambar mas gruesa y punteada para leerla aparte.
+  vwapSeries = chart.addLineSeries({
+    color: VWAP_COLOR, lineWidth: 2,
+    lineStyle: LightweightCharts.LineStyle.Dotted,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  });
+
   new ResizeObserver(() => {
     chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
   }).observe(container);
@@ -370,7 +379,8 @@ function buildLegend() {
     Object.entries(MA_COLORS).map(([p, color]) =>
       `<span><span class="dot" style="background:${color}"></span>MA ${p}</span>`
     ).join('') +
-    `<span><span class="dot" style="background:${BB_COLOR}"></span>Bollinger 20,2</span>`;
+    `<span><span class="dot" style="background:${BB_COLOR}"></span>Bollinger 20,2</span>` +
+    `<span><span class="dot" style="background:${VWAP_COLOR}"></span>VWAP</span>`;
 }
 
 async function loadData() {
@@ -400,6 +410,8 @@ async function loadData() {
     for (const period of Object.keys(MA_COLORS)) {
       maSeriesMap[period].setData(data.ma_curves[period] || []);
     }
+
+    if (vwapSeries) vwapSeries.setData(data.vwap || []);
 
     const bb = data.bollinger || {};
     bbSeries.upper.setData(bb.upper || []);
