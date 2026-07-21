@@ -226,7 +226,7 @@ const HTF_LABELS = { '1h': '1H', '1d': 'D', '1w': 'W' };
 
 const BB_COLOR = '#4c8dff';       // linea de las bandas (azul)
 const BB_FILL = 'rgba(76, 141, 255, 0.12)';  // relleno translucido azulito
-const VWAP_COLOR = '#f59f00';     // VWAP en ambar, para distinguirlo de las MAs
+const VWAP_COLOR = '#00e5ff';     // VWAP en cian brillante: no lo usa ninguna MA
 
 let chart = null;
 let candleSeries = null;
@@ -361,11 +361,11 @@ function createChart() {
     });
   }
 
-  // VWAP de sesion: linea ambar mas gruesa y punteada para leerla aparte.
+  // VWAP de sesion: linea cian solida y gruesa para leerla de un vistazo.
   vwapSeries = chart.addLineSeries({
-    color: VWAP_COLOR, lineWidth: 2,
-    lineStyle: LightweightCharts.LineStyle.Dotted,
-    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    color: VWAP_COLOR, lineWidth: 3,
+    lineStyle: LightweightCharts.LineStyle.Solid,
+    priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
   });
 
   new ResizeObserver(() => {
