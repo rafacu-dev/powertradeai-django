@@ -160,6 +160,12 @@ header h1 span {
   background: var(--amber-bg);
   box-shadow: inset 3px 0 0 var(--amber);
 }
+.dot-price {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 6px; vertical-align: middle;
+}
+.dot-price.green { background: var(--green); }
+.dot-price.red { background: var(--red); }
 .badge-scan {
   display: inline-block; padding: 2px 8px; border-radius: 20px;
   font-size: 11px; font-weight: 600;
@@ -582,12 +588,17 @@ async function loadScanner() {
       const outside = r.status === 'FUERA_ARRIBA' || r.status === 'FUERA_ABAJO';
       const zTxt = r.z != null ? (r.z > 0 ? '+' : '') + r.z.toFixed(2) : '&mdash;';
 
-      // Precio: gris en premarket; blanco dentro de banda; verde si abrio
-      // bajo la banda inferior; rojo si abrio sobre la superior.
+      // Precio: gris en premarket (con puntico si esta fuera de banda);
+      // verde si el precio esta bajo la banda inferior; rojo si esta sobre
+      // la superior; blanco si esta dentro tras abrir.
       let priceColor = 'var(--text)';
       if (!r.is_open) priceColor = 'var(--text-3)';
-      else if (r.status === 'FUERA_ABAJO') priceColor = 'var(--green)';
-      else if (r.status === 'FUERA_ARRIBA') priceColor = 'var(--red)';
+      else if (r.price_status === 'ABAJO') priceColor = 'var(--green)';
+      else if (r.price_status === 'ARRIBA') priceColor = 'var(--red)';
+      // Puntico a la izquierda cuando el precio esta fuera de banda.
+      let dot = '';
+      if (r.price_status === 'ABAJO') dot = '<span class="dot-price green"></span>';
+      else if (r.price_status === 'ARRIBA') dot = '<span class="dot-price red"></span>';
       const priceTxt = r.price != null ? r.price.toFixed(2) : '&mdash;';
       const trendCls = r.trend === 'alcista' ? 'up'
         : r.trend === 'bajista' ? 'down' : 'inside';
@@ -611,7 +622,7 @@ async function loadScanner() {
         `<td>${r.lower.toFixed(2)}</td>` +
         `<td style="color:var(--text-3)">${r.middle.toFixed(2)}</td>` +
         `<td>${r.upper.toFixed(2)}</td>` +
-        `<td><strong style="color:${priceColor}">${priceTxt}</strong></td>` +
+        `<td>${dot}<strong style="color:${priceColor}">${priceTxt}</strong></td>` +
         `<td>${zTxt}</td>` +
         `</tr>`;
     }
@@ -624,7 +635,7 @@ async function loadScanner() {
 
     const counter = data.rows.filter(r => r.counter_trend).length;
     const hits = data.rows.filter(r =>
-      r.status === 'FUERA_ARRIBA' || r.status === 'FUERA_ABAJO').length;
+      r.price_status === 'ARRIBA' || r.price_status === 'ABAJO').length;
     status.textContent =
       `${data.date} · ${hits} fuera de banda · ${counter} contra-tendencia`;
   } catch (err) {

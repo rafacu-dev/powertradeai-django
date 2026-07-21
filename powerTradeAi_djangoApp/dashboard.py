@@ -379,41 +379,48 @@ def scanner_data(request):
             except Exception:
                 price = float(closes.iloc[-1])
 
-        counter_trend = False
-        score = 0.0
+        # Estado de la APERTURA (la senal real). PENDIENTE en premarket.
         if today_open is None:
             status = "PENDIENTE"
-            z = None
+        elif today_open > upper:
+            status = "FUERA_ARRIBA"
+        elif today_open < lower:
+            status = "FUERA_ABAJO"
         else:
-            z = (today_open - mid) / std if std else 0.0
-            if today_open > upper:
-                status = "FUERA_ARRIBA"
-            elif today_open < lower:
-                status = "FUERA_ABAJO"
-            else:
-                status = "DENTRO"
+            status = "DENTRO"
 
-            outside = status in ("FUERA_ARRIBA", "FUERA_ABAJO")
-            if outside:
-                counter_trend = (
-                    (trend == "alcista" and status == "FUERA_ABAJO") or
-                    (trend == "bajista" and status == "FUERA_ARRIBA")
-                )
-                # Contra-tendencia pesa el doble que a favor.
-                weight = 2.0 if counter_trend else 1.0
-                score = abs(z) * weight
+        # Estado del PRECIO mostrado (apertura si abrio; si no, precio en vivo
+        # de premarket). Es lo que dispara el puntico y la prioridad.
+        z = (price - mid) / std if std else 0.0
+        if price > upper:
+            price_status = "ARRIBA"     # sobre la banda superior -> rojo
+        elif price < lower:
+            price_status = "ABAJO"      # bajo la banda inferior  -> verde
+        else:
+            price_status = "DENTRO"
+
+        # Contra-tendencia: solo cuenta con tendencia horaria CLARA.
+        outside = price_status in ("ARRIBA", "ABAJO")
+        counter_trend = outside and (
+            (trend == "alcista" and price_status == "ABAJO") or
+            (trend == "bajista" and price_status == "ARRIBA")
+        )
+        # Score: distancia a la media (|z|), x2 si es contra-tendencia clara.
+        weight = 2.0 if counter_trend else 1.0
+        score = abs(z) * weight if outside else 0.0
 
         rows.append({
             "symbol": symbol,
             "status": status,
             "price": round(price, 2),
             "is_open": is_open,
+            "price_status": price_status,
             "open": round(today_open, 2) if today_open is not None else None,
             "lower": round(lower, 2),
             "middle": round(mid, 2),
             "upper": round(upper, 2),
             "prev_close": round(float(closes.iloc[-1]), 2),
-            "z": round(z, 2) if z is not None else None,
+            "z": round(z, 2),
             "ma20": round(ma_fast, 2),
             "ma40": round(ma_slow, 2),
             "trend": trend,
@@ -421,10 +428,13 @@ def scanner_data(request):
             "score": round(score, 2),
         })
 
-    # Mayor score primero (contra-tendencia sube arriba); pendientes al final.
+    # Primero los que tienen el precio FUERA de banda; mientras mas lejos de
+    # la media (mayor score), mas arriba. Errores/sin datos al final.
     def sort_key(r):
-        has_score = r.get("status") in ("FUERA_ARRIBA", "FUERA_ABAJO", "DENTRO")
-        return (0 if has_score else 1, -(r.get("score") or 0), -abs(r.get("z") or 0))
+        outside = r.get("price_status") in ("ARRIBA", "ABAJO")
+        valid = "price_status" in r
+        return (0 if valid else 1, 0 if outside else 1,
+                -(r.get("score") or 0), -abs(r.get("z") or 0))
 
     rows.sort(key=sort_key)
 
