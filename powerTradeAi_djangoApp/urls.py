@@ -6,7 +6,9 @@ En el proyecto anfitrion:
 """
 from django.urls import path
 
-from .dashboard import chart_data, chart_view, dashboard, replay_action
+from .dashboard import (
+    chart_data, chart_view, dashboard, replay_action, scanner_data,
+)
 
 app_name = "powertradeai"
 
@@ -15,4 +17,5 @@ urlpatterns = [
     path("replay/", replay_action, name="replay_action"),
     path("chart/", chart_view, name="chart"),
     path("chart/data/", chart_data, name="chart_data"),
+    path("scanner/data/", scanner_data, name="scanner_data"),
 ]

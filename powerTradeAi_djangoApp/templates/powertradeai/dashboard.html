@@ -116,6 +116,53 @@ header h1 span {
 .stat-value.positive { color: var(--green); }
 .stat-value.negative { color: var(--red); }
 
+/* ---- Scanner ---- */
+.scanner {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 24px;
+  overflow: hidden;
+}
+.scanner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.scanner-title { font-size: 15px; font-weight: 600; }
+.scanner-sub { font-size: 12px; color: var(--text-3); margin-left: 8px; }
+.scanner-status { font-size: 12px; color: var(--text-3); }
+.scanner-body { overflow-x: auto; }
+.scanner-empty { padding: 20px 16px; color: var(--text-3); font-size: 13px; }
+.scanner table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.scanner th, .scanner td {
+  padding: 9px 12px; text-align: right; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.scanner th {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+  color: var(--text-3); font-weight: 500; border-bottom: 1px solid var(--border);
+  text-align: right;
+}
+.scanner th:first-child, .scanner td:first-child { text-align: left; }
+.scanner td.sym { font-weight: 600; }
+.scanner tbody tr { border-bottom: 1px solid var(--border); }
+.scanner tbody tr:last-child { border-bottom: none; }
+.scanner tr.hit-up { background: var(--green-bg); }
+.scanner tr.hit-down { background: var(--red-bg); }
+.badge-scan {
+  display: inline-block; padding: 2px 8px; border-radius: 20px;
+  font-size: 11px; font-weight: 600;
+}
+.badge-scan.up { background: var(--green-bg); color: var(--green); }
+.badge-scan.down { background: var(--red-bg); color: var(--red); }
+.badge-scan.inside { background: var(--border); color: var(--text-2); }
+.badge-scan.pending { background: var(--amber-bg); color: var(--amber); }
+
 /* ---- Filters ---- */
 .filters-bar {
   display: flex;
@@ -323,8 +370,28 @@ tbody tr:hover { background: var(--bg); }
 
 <header>
   <h1><span>Power</span>TradeAI</h1>
-  <a href="{% url 'admin:logout' %}" class="logout">Cerrar sesion</a>
+  <div style="display:flex;gap:16px;align-items:center">
+    <a href="{% url 'powertradeai:chart' %}" class="logout">Chart</a>
+    <a href="{% url 'admin:logout' %}" class="logout">Cerrar sesion</a>
+  </div>
 </header>
+
+<!-- Scanner de apertura vs Bollinger -->
+<div class="scanner">
+  <div class="scanner-head">
+    <div>
+      <span class="scanner-title">Scanner de apertura</span>
+      <span class="scanner-sub">Bollinger diario (20,2) vs apertura de hoy</span>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <span class="scanner-status" id="scanner-status"></span>
+      <button class="btn" id="scanner-btn" onclick="loadScanner()">Escanear</button>
+    </div>
+  </div>
+  <div class="scanner-body" id="scanner-body">
+    <div class="scanner-empty">Pulsa &laquo;Escanear&raquo; para calcular.</div>
+  </div>
+</div>
 
 <!-- Stats -->
 <div class="stats">
@@ -472,6 +539,65 @@ tbody tr:hover { background: var(--bg); }
 </div>
 
 <script>
+const SCAN_STATUS = {
+  FUERA_ARRIBA: { cls: 'up',      row: 'hit-up',   label: '▲ Fuera arriba' },
+  FUERA_ABAJO:  { cls: 'down',    row: 'hit-down', label: '▼ Fuera abajo' },
+  DENTRO:       { cls: 'inside',  row: '',         label: 'Dentro' },
+  PENDIENTE:    { cls: 'pending', row: '',         label: 'Sin apertura' },
+};
+
+async function loadScanner() {
+  const btn = document.getElementById('scanner-btn');
+  const status = document.getElementById('scanner-status');
+  const body = document.getElementById('scanner-body');
+  btn.disabled = true;
+  status.textContent = 'Calculando...';
+
+  try {
+    const resp = await fetch("{% url 'powertradeai:scanner_data' %}");
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+
+    let rows = '';
+    for (const r of data.rows) {
+      if (!r.status || r.status === 'ERROR' || r.status === 'SIN_DATOS') {
+        rows += `<tr><td class="sym">${r.symbol}</td>` +
+          `<td colspan="6" style="text-align:left;color:var(--text-3)">` +
+          `${r.status === 'ERROR' ? 'error' : 'sin datos'}</td></tr>`;
+        continue;
+      }
+      const s = SCAN_STATUS[r.status] || SCAN_STATUS.DENTRO;
+      const openTxt = r.open != null ? r.open.toFixed(2) : '&mdash;';
+      const zTxt = r.z != null ? (r.z > 0 ? '+' : '') + r.z.toFixed(2) : '&mdash;';
+      rows += `<tr class="${s.row}">` +
+        `<td class="sym">${r.symbol}</td>` +
+        `<td><span class="badge-scan ${s.cls}">${s.label}</span></td>` +
+        `<td>${r.lower.toFixed(2)}</td>` +
+        `<td style="color:var(--text-3)">${r.middle.toFixed(2)}</td>` +
+        `<td>${r.upper.toFixed(2)}</td>` +
+        `<td><strong>${openTxt}</strong></td>` +
+        `<td>${zTxt}</td>` +
+        `</tr>`;
+    }
+
+    body.innerHTML =
+      '<table><thead><tr>' +
+      '<th>Símbolo</th><th>Estado</th><th>Banda inf</th><th>Media</th>' +
+      '<th>Banda sup</th><th>Apertura</th><th>Z</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>';
+
+    const hits = data.rows.filter(r =>
+      r.status === 'FUERA_ARRIBA' || r.status === 'FUERA_ABAJO').length;
+    status.textContent = `${data.date} · ${hits} fuera de banda`;
+  } catch (err) {
+    document.getElementById('scanner-body').innerHTML =
+      `<div class="scanner-empty">Error: ${err.message}</div>`;
+    status.textContent = '';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function runReplay() {
   const dateInput = document.getElementById('replay-date');
   const status = document.getElementById('replay-status');

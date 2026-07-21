@@ -246,3 +246,108 @@ def chart_data(request):
         "htf_lines": htf_lines,
         "bollinger": bb,
     })
+
+
+# ── Scanner de apertura vs Bollinger diario ─────────────────────────
+
+# 10 mayores del NASDAQ (peso en el Nasdaq-100, mediados de 2026) + indices.
+SCANNER_WATCHLIST = [
+    "NVDA", "AAPL", "MSFT", "AMZN", "AVGO",
+    "META", "GOOGL", "TSLA", "COST", "NFLX",
+    # Indices via ETF: Nasdaq, S&P 500, Dow Jones.
+    "QQQ", "SPY", "DIA",
+]
+
+
+@staff_member_required
+@require_GET
+def scanner_data(request):
+    """Bollinger diario (cerrado hasta ayer) vs precio de apertura de hoy.
+
+    El Bollinger diario solo usa cierres ya cerrados, asi que queda fijo
+    antes de la apertura. A las 9:30 comparamos la apertura de hoy contra
+    esas bandas: quien abre fuera es candidato. No se usa premarket.
+    """
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+
+    from django.conf import settings
+    from .data.alpaca_provider import AlpacaProvider
+    from .data.base import MarketDataError
+
+    NY = ZoneInfo("America/New_York")
+    cfg = getattr(settings, "POWERTRADEAI", {})
+    provider = AlpacaProvider(
+        api_key=cfg.get("ALPACA_API_KEY"),
+        api_secret=cfg.get("ALPACA_API_SECRET"),
+        feed=cfg.get("ALPACA_FEED", "iex"),
+    )
+
+    period, k = 20, 2
+    today = datetime.now(NY).date()
+    start = today - timedelta(days=60)
+
+    rows = []
+    for symbol in SCANNER_WATCHLIST:
+        try:
+            bars = provider.bars(symbol, start, today, "1d")
+        except MarketDataError as exc:
+            rows.append({"symbol": symbol, "status": "ERROR", "detail": str(exc)})
+            continue
+        if bars.empty:
+            rows.append({"symbol": symbol, "status": "SIN_DATOS"})
+            continue
+
+        dates = bars.index.tz_convert(NY).date
+        today_mask = dates == today
+        hist = bars[~today_mask]              # cerrados hasta ayer
+        if len(hist) < period:
+            rows.append({"symbol": symbol, "status": "SIN_DATOS"})
+            continue
+
+        closes = hist["close"].iloc[-period:]
+        mid = float(closes.mean())
+        std = float(closes.std(ddof=0))       # poblacional, como TradingView
+        upper = mid + k * std
+        lower = mid - k * std
+
+        today_open = None
+        if today_mask.any():
+            today_open = float(bars[today_mask]["open"].iloc[0])
+
+        if today_open is None:
+            status = "PENDIENTE"
+            z = None
+        else:
+            z = (today_open - mid) / std if std else 0.0
+            if today_open > upper:
+                status = "FUERA_ARRIBA"
+            elif today_open < lower:
+                status = "FUERA_ABAJO"
+            else:
+                status = "DENTRO"
+
+        rows.append({
+            "symbol": symbol,
+            "status": status,
+            "open": round(today_open, 2) if today_open is not None else None,
+            "lower": round(lower, 2),
+            "middle": round(mid, 2),
+            "upper": round(upper, 2),
+            "prev_close": round(float(hist["close"].iloc[-1]), 2),
+            "z": round(z, 2) if z is not None else None,
+        })
+
+    # Los que abrieron fuera primero, luego por |z| descendente.
+    def sort_key(r):
+        outside = r.get("status") in ("FUERA_ARRIBA", "FUERA_ABAJO")
+        return (0 if outside else 1, -abs(r.get("z") or 0))
+
+    rows.sort(key=sort_key)
+
+    return JsonResponse({
+        "date": str(today),
+        "period": period,
+        "k": k,
+        "rows": rows,
+    })
