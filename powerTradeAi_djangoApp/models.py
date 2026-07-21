@@ -63,6 +63,7 @@ class Alert(models.Model):
     class Source(models.TextChoices):
         LIVE = "live", "En vivo"
         REPLAY = "replay", "Reconstruida"
+        AGENT = "agent", "Agente"
 
     strategy = models.ForeignKey(
         Strategy, on_delete=models.PROTECT, related_name="alerts")
@@ -129,6 +130,11 @@ class Alert(models.Model):
     meta = models.JSONField(
         default=dict, blank=True,
         help_text="Contexto de la regla: rango, umbrales, features.")
+    # Cuando la genero el agente (source=agent): apunta a la corrida que la
+    # decidio, para poder abrir su razonamiento completo desde la alerta.
+    agent_run = models.ForeignKey(
+        "AgentRun", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="alerts")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -266,3 +272,64 @@ class ScanRun(models.Model):
 
     def __str__(self) -> str:
         return f"scan {self.started_at:%Y-%m-%d %H:%M:%S} ok={self.ok}"
+
+
+class AgentRun(models.Model):
+    """Una corrida del agente: su consigna, todo su proceso de pensamiento
+    (mensajes + llamadas a skills) y el resultado. Es la caja negra abierta:
+    cada alerta que el agente lanza queda ligada a la corrida que la penso."""
+
+    class Status(models.TextChoices):
+        RUNNING = "running", "En curso"
+        DONE = "done", "Terminada"
+        ERROR = "error", "Error"
+
+    class Trigger(models.TextChoices):
+        SCAN_LOOP = "scan_loop", "Scan loop"
+        MANUAL = "manual", "Manual"
+
+    trigger = models.CharField(
+        max_length=16, choices=Trigger.choices, default=Trigger.MANUAL)
+    status = models.CharField(
+        max_length=10, choices=Status.choices,
+        default=Status.RUNNING, db_index=True)
+    model_name = models.CharField(max_length=80, blank=True)
+    symbols = models.JSONField(
+        default=list, blank=True, help_text="Activos que miro esta corrida.")
+    goal = models.TextField(blank=True, help_text="La consigna que recibio.")
+    # Traza completa de razonamiento: lista de pasos
+    # {role, content, tool, args, result}. Es el 'proceso de pensamiento'.
+    transcript = models.JSONField(default=list, blank=True)
+    summary = models.TextField(blank=True, help_text="Conclusion en breve.")
+    alerts_created = models.PositiveIntegerField(default=0)
+    error = models.TextField(blank=True)
+    started_at = models.DateTimeField(default=timezone.now, db_index=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+
+    def __str__(self) -> str:
+        return f"agent {self.started_at:%Y-%m-%d %H:%M:%S} [{self.status}]"
+
+
+class AgentAnalysis(models.Model):
+    """Analisis del agente sobre un activo. Append-only: cada corrida deja una
+    entrada nueva, y la siguiente lee las ultimas para tener continuidad y no
+    empezar de cero cada vez."""
+
+    symbol = models.CharField(max_length=16, db_index=True)
+    analysis = models.TextField(help_text="Lo que el agente concluye del activo.")
+    stance = models.CharField(
+        max_length=16, blank=True,
+        help_text="Sesgo: alcista / bajista / neutral / observando.")
+    agent_run = models.ForeignKey(
+        AgentRun, on_delete=models.CASCADE, related_name="analyses")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["symbol", "-created_at"])]
+
+    def __str__(self) -> str:
+        return f"{self.symbol} {self.created_at:%Y-%m-%d %H:%M} ({self.stance})"

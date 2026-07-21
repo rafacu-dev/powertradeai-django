@@ -389,6 +389,7 @@ tbody tr:hover { background: var(--bg); }
 <header>
   <h1><span>Power</span>TradeAI</h1>
   <div style="display:flex;gap:16px;align-items:center">
+    <a href="{% url 'powertradeai:agent' %}" class="logout">Agente</a>
     <a href="{% url 'powertradeai:chart' %}" class="logout">Chart</a>
     <a href="{% url 'admin:logout' %}" class="logout">Cerrar sesion</a>
   </div>

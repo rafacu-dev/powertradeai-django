@@ -127,6 +127,47 @@ def replay_action(request):
     })
 
 
+# ── Agente ──────────────────────────────────────────────────────────
+
+@staff_member_required
+@require_GET
+def agent_view(request):
+    from .models import AgentAnalysis, AgentRun
+
+    runs = AgentRun.objects.all()[:30]
+    # Ultimo analisis por activo (para el panel de continuidad).
+    latest = {}
+    for a in AgentAnalysis.objects.all()[:200]:
+        latest.setdefault(a.symbol, a)
+    analyses = sorted(latest.values(), key=lambda a: a.created_at, reverse=True)
+    return render(request, "powertradeai/agent.html", {
+        "runs": runs,
+        "analyses": analyses,
+    })
+
+
+@staff_member_required
+@require_POST
+def agent_launch(request):
+    from .agent.runner import run_agent
+
+    symbols = [s.strip().upper() for s in request.POST.get("symbols", "").split(",")
+               if s.strip()]
+    goal = request.POST.get("goal", "").strip() or (
+        "Revisa la watchlist, actualiza tu analisis y lanza una alerta solo si "
+        "hay una tesis clara.")
+    try:
+        run = run_agent(goal, symbols=symbols, trigger="manual")
+    except Exception as exc:
+        log.exception("agente fallo desde el panel")
+        return JsonResponse({"error": str(exc)}, status=500)
+    return JsonResponse({
+        "run_id": run.id, "status": run.status,
+        "summary": run.summary, "steps": len(run.transcript),
+        "alerts_created": run.alerts_created, "error": run.error,
+    })
+
+
 # ── Chart view ──────────────────────────────────────────────────────
 
 @staff_member_required

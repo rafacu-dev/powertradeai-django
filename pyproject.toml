@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "powertradeai-django"
-version = "1.12.0"
+version = "1.13.0"
 description = "App de Django que escanea el mercado, evalua las estrategias del proyecto y registra alertas con su P&L."
 requires-python = ">=3.12"
 # Combinacion verificada (los 37 tests de este repo + 41 de paridad en
@@ -27,6 +27,9 @@ dependencies = [
     # Subyacente (velas, precio, tape). El feed IEX es el que valido las
     # reglas en research/: no cambiarlo sin releer el README de la app.
     "alpaca-py>=0.43",
+    # Cliente del agente. Compatible con OpenAI: sirve para DeepSeek/Kimi/GLM/
+    # Qwen cambiando base_url. Solo se usa si activas el agente.
+    "openai>=1.40",
 ]
 
 [tool.setuptools]
