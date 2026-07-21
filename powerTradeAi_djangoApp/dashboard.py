@@ -267,18 +267,20 @@ BB_K = 2            # Desviaciones estandar de las bandas.
 @require_GET
 def scanner_data(request):
     """Bollinger 15m (cerrado hasta ayer) vs apertura de hoy, ponderado por
-    tendencia MA20/MA40.
+    tendencia MA20/MA40 en 1 HORA.
 
-    Las bandas y las medias se calculan con velas de 15m RTH ya cerradas
-    (hasta el cierre de ayer), asi que quedan fijas antes de la apertura;
-    no se usa premarket. A las 9:30 comparamos la apertura contra esas
-    bandas.
+    Las bandas de Bollinger se calculan con velas de 15m RTH ya cerradas
+    (hasta el cierre de ayer); la tendencia se lee con MA20/MA40 sobre
+    velas de 1h RTH tambien cerradas. Todo queda fijo antes de la apertura;
+    no se usa premarket. A las 9:30 comparamos la apertura contra las
+    bandas de 15m.
 
-    Ponderacion: pesa mas la apertura que va EN CONTRA de la tendencia.
-      - Tendencia alcista (MA20 > MA40): pesa mas quien abre por DEBAJO de
-        la banda inferior (retroceso contra-tendencia).
-      - Tendencia bajista (MA40 > MA20): pesa mas quien abre por ENCIMA de
-        la banda superior.
+    Ponderacion: pesa mas la apertura que va EN CONTRA de la tendencia
+    horaria.
+      - Tendencia alcista (MA20 > MA40 en 1h): pesa mas quien abre por
+        DEBAJO de la banda inferior (retroceso contra-tendencia).
+      - Tendencia bajista (MA40 > MA20 en 1h): pesa mas quien abre por
+        ENCIMA de la banda superior.
     """
     from zoneinfo import ZoneInfo
 
@@ -297,12 +299,25 @@ def scanner_data(request):
     open_lo = datetime(2000, 1, 1, 9, 30).time()
     open_hi = datetime(2000, 1, 1, 16, 0).time()
     today = datetime.now(NY).date()
-    start = today - timedelta(days=15)   # ~15 dias cubre >40 velas RTH de 15m
+    # ~15 dias cubre >40 velas RTH de 15m; ~40 dias cubre >40 velas RTH de 1h.
+    start_15m = today - timedelta(days=15)
+    start_1h = today - timedelta(days=40)
+
+    def rth_closed(df):
+        """Velas RTH (9:30-16:00) cerradas hasta ayer (excluye hoy)."""
+        if df.empty:
+            return df
+        ny = df.index.tz_convert(NY)
+        rth = df[(ny.time >= open_lo) & (ny.time < open_hi)]
+        if rth.empty:
+            return rth
+        return rth[rth.index.tz_convert(NY).date != today]
 
     rows = []
     for symbol in SCANNER_WATCHLIST:
         try:
-            bars = provider.bars(symbol, start, today, "15m")
+            bars = provider.bars(symbol, start_15m, today, "15m")
+            bars_1h = provider.bars(symbol, start_1h, today, "1h")
         except MarketDataError as exc:
             rows.append({"symbol": symbol, "status": "ERROR", "detail": str(exc)})
             continue
@@ -319,18 +334,25 @@ def scanner_data(request):
         rth_dates = rth.index.tz_convert(NY).date
         today_mask = rth_dates == today
         hist = rth[~today_mask]              # velas 15m RTH cerradas hasta ayer
-        if len(hist) < MA_SLOW:
+
+        # Tendencia en 1h: MA20 vs MA40 sobre velas horarias RTH cerradas.
+        h1 = rth_closed(bars_1h)
+        if len(hist) < BB_PERIOD or len(h1) < MA_SLOW:
             rows.append({"symbol": symbol, "status": "SIN_DATOS"})
             continue
 
+        # Bollinger sobre 15m.
         closes = hist["close"]
         bb_win = closes.iloc[-BB_PERIOD:]
-        mid = float(bb_win.mean())          # = MA20 (base de Bollinger)
+        mid = float(bb_win.mean())
         std = float(bb_win.std(ddof=0))     # poblacional, como TradingView
         upper = mid + BB_K * std
         lower = mid - BB_K * std
-        ma_fast = mid
-        ma_slow = float(closes.iloc[-MA_SLOW:].mean())
+
+        # Medias de tendencia sobre 1h.
+        h1_closes = h1["close"]
+        ma_fast = float(h1_closes.iloc[-BB_PERIOD:].mean())   # MA20 en 1h
+        ma_slow = float(h1_closes.iloc[-MA_SLOW:].mean())     # MA40 en 1h
 
         # Tendencia por cruce de medias (con banda muerta de 0.05%).
         spread = (ma_fast - ma_slow) / ma_slow if ma_slow else 0.0
@@ -394,7 +416,8 @@ def scanner_data(request):
 
     return JsonResponse({
         "date": str(today),
-        "timeframe": "15m",
+        "bb_timeframe": "15m",
+        "trend_timeframe": "1h",
         "bb_period": BB_PERIOD,
         "ma_slow": MA_SLOW,
         "k": BB_K,
