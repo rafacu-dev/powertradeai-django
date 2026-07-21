@@ -532,6 +532,84 @@ def save_note(ctx, topic: str, note: str):
 
 
 @skill(
+    "set_price_trigger",
+    "Fija un nivel de precio en el que quieres que te despierten. Cuando el "
+    "precio lo toque, el loop te llamara de nuevo con ese contexto para que "
+    "decidas. Usalo para vigilar soportes, resistencias o puntos de ruptura sin "
+    "tener que estar mirando. Si no indicas direccion, se deduce del precio "
+    "actual (arriba si el nivel esta por encima, abajo si esta por debajo).",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "price": {"type": "number", "description": "Nivel a vigilar."},
+            "reason": {"type": "string",
+                       "description": "Que esperas en ese nivel y que haras."},
+            "direction": {"type": "string", "enum": ["above", "below"],
+                          "description": "Opcional. Disparar al subir o al bajar."},
+        },
+        "required": ["symbol", "price", "reason"],
+    },
+)
+def set_price_trigger(ctx, symbol: str, price: float, reason: str,
+                      direction: str | None = None):
+    from ..models import AgentTrigger
+    provider = _provider()
+    sym = symbol.upper()
+    try:
+        ref = float(provider.latest_price(sym))
+    except Exception:
+        ref = None
+    if direction not in ("above", "below"):
+        direction = "above" if (ref is None or float(price) >= ref) else "below"
+    t = AgentTrigger.objects.create(
+        symbol=sym, price=round(float(price), 2), direction=direction,
+        reason=reason, ref_price=round(ref, 2) if ref else None,
+        agent_run=ctx["run"],
+    )
+    return {"trigger_id": t.id, "symbol": sym, "price": t.price,
+            "direction": direction, "ref_price": t.ref_price}
+
+
+@skill(
+    "list_price_triggers",
+    "Lista tus niveles de vigilancia activos para un activo, para no duplicar "
+    "ni olvidar los que ya pusiste.",
+    {
+        "type": "object",
+        "properties": {"symbol": {"type": "string"}},
+        "required": ["symbol"],
+    },
+)
+def list_price_triggers(ctx, symbol: str):
+    from ..models import AgentTrigger
+    qs = AgentTrigger.objects.filter(symbol=symbol.upper(), active=True)
+    return {
+        "symbol": symbol.upper(),
+        "triggers": [
+            {"id": t.id, "price": float(t.price), "direction": t.direction,
+             "reason": t.reason}
+            for t in qs
+        ],
+    }
+
+
+@skill(
+    "cancel_price_trigger",
+    "Desactiva un nivel de vigilancia que ya no te interesa, por su id.",
+    {
+        "type": "object",
+        "properties": {"trigger_id": {"type": "integer"}},
+        "required": ["trigger_id"],
+    },
+)
+def cancel_price_trigger(ctx, trigger_id: int):
+    from ..models import AgentTrigger
+    n = AgentTrigger.objects.filter(id=trigger_id, active=True).update(active=False)
+    return {"cancelled": bool(n), "trigger_id": trigger_id}
+
+
+@skill(
     "get_notes",
     "Lee tus notas previas por tema, para no perder tus propias ideas y reglas.",
     {

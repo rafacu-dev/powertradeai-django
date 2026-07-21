@@ -353,3 +353,41 @@ class AgentNote(models.Model):
 
     def __str__(self) -> str:
         return f"[{self.topic}] {self.note[:40]}"
+
+
+class AgentTrigger(models.Model):
+    """Nivel de precio que el agente pide vigilar. Cuando el precio lo toca, el
+    loop despierta al agente para que decida. Es el agente marcando sus propios
+    puntos de interes, en vez de reaccionar solo a un umbral fijo de movimiento."""
+
+    class Direction(models.TextChoices):
+        ABOVE = "above", "Al subir a/por encima"
+        BELOW = "below", "Al bajar a/por debajo"
+
+    symbol = models.CharField(max_length=16, db_index=True)
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    direction = models.CharField(max_length=8, choices=Direction.choices)
+    reason = models.TextField(
+        blank=True, help_text="Que espera el agente en ese nivel / que hara.")
+    ref_price = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Precio cuando lo fijo, para saber de que lado venia.")
+    active = models.BooleanField(default=True, db_index=True)
+    agent_run = models.ForeignKey(
+        AgentRun, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="triggers")
+    created_at = models.DateTimeField(auto_now_add=True)
+    triggered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["symbol", "active"])]
+
+    def __str__(self) -> str:
+        return f"{self.symbol} {self.get_direction_display()} {self.price}"
+
+    def is_hit(self, price: float) -> bool:
+        p = float(self.price)
+        if self.direction == self.Direction.ABOVE:
+            return price >= p
+        return price <= p
