@@ -277,9 +277,10 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
 
 @skill(
     "create_alert",
-    "Registra una alerta marcada como generada por el agente. Aparece en el "
-    "dashboard con tu razonamiento adjunto. Usala solo cuando tengas una tesis "
-    "clara y accionable sobre un activo.",
+    "Registra una alerta marcada como generada por el agente: es una PREDICCION "
+    "con fecha de vencimiento que luego se puntua sola. Indica el horizonte en "
+    "minutos (cuanto vale tu tesis). Aparece en el dashboard con tu razonamiento. "
+    "Usala solo cuando tengas una tesis clara y accionable.",
     {
         "type": "object",
         "properties": {
@@ -287,11 +288,15 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
             "direction": {"type": "string", "enum": ["CALL", "PUT"]},
             "thesis": {"type": "string",
                        "description": "Por que lanzas la alerta, en breve."},
+            "horizon_minutes": {"type": "integer",
+                                "description": "Cuanto tiempo vale tu tesis "
+                                               "(def. 120; se acota al cierre)."},
         },
         "required": ["symbol", "direction", "thesis"],
     },
 )
-def create_alert(ctx, symbol: str, direction: str, thesis: str):
+def create_alert(ctx, symbol: str, direction: str, thesis: str,
+                 horizon_minutes: int = 120):
     from django.utils import timezone
 
     from ..models import Alert, Strategy
@@ -309,21 +314,30 @@ def create_alert(ctx, symbol: str, direction: str, thesis: str):
             "rule_version": "agent_v1", "enabled": False,
         },
     )
-    today = datetime.now(NY).date()
     now = timezone.now()
+    today = now.astimezone(NY).date()
+    horizon = max(int(horizon_minutes or 120), 5)
+    # El horizonte se acota al cierre de la sesion (16:00 NY).
+    close_dt = datetime.combine(today, datetime(2000, 1, 1, 16, 0).time(),
+                                tzinfo=NY)
+    exit_at = min(now + timedelta(minutes=horizon), close_dt)
+
     alert, created = Alert.objects.update_or_create(
         strategy=strategy, session_date=today,
         direction=direction, source=Alert.Source.AGENT,
         defaults={
             "rule_version": "agent_v1", "symbol": sym,
             "status": Alert.Status.PENDING, "signal_ts": now,
-            "detected_at": now, "agent_run": ctx["run"],
+            "detected_at": now, "entry_ts": now,
+            "scheduled_exit_ts": exit_at, "agent_run": ctx["run"],
             "underlying_at_signal": spot,
-            "meta": {"thesis": thesis, "by": "agent"},
+            "meta": {"thesis": thesis, "by": "agent",
+                     "entry_price": spot, "horizon_minutes": horizon},
         },
     )
-    return {"alert_id": alert.id, "created": created,
-            "symbol": sym, "direction": direction}
+    return {"alert_id": alert.id, "created": created, "symbol": sym,
+            "direction": direction, "entry_price": spot,
+            "resolves_at": exit_at.astimezone(NY).strftime("%H:%M")}
 
 
 # ── Skills de day-trader: indicadores, historicos, backtest, notas ──
@@ -529,6 +543,51 @@ def save_note(ctx, topic: str, note: str):
     from ..models import AgentNote
     AgentNote.objects.create(topic=topic.strip()[:80], note=note, agent_run=ctx["run"])
     return {"saved": True, "topic": topic.strip()[:80]}
+
+
+@skill(
+    "get_my_track_record",
+    "Tu expediente real: como te fue con las alertas que YA lanzaste y se "
+    "cerraron (acierto direccional del subyacente). Consultalo para ser honesto "
+    "contigo mismo y ajustar tu exigencia. Opcional filtrar por activo.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string", "description": "Opcional."},
+        },
+    },
+)
+def get_my_track_record(ctx, symbol: str | None = None):
+    from ..models import Alert
+    qs = Alert.objects.filter(source=Alert.Source.AGENT,
+                              status=Alert.Status.CLOSED)
+    if symbol:
+        qs = qs.filter(symbol=symbol.upper())
+    closed = list(qs.order_by("-signal_ts")[:200])
+    n = len(closed)
+    if not n:
+        return {"closed": 0, "note": "aun no tienes alertas cerradas"}
+
+    def stats(items):
+        if not items:
+            return None
+        rets = [float(a.net_pct or 0) for a in items]
+        wins = sum(1 for r in rets if r > 0)
+        return {"n": len(items), "win_rate_pct": round(wins / len(items) * 100, 1),
+                "avg_return_pct": round(sum(rets) / len(rets), 2),
+                "best_pct": round(max(rets), 2), "worst_pct": round(min(rets), 2)}
+
+    calls = [a for a in closed if a.direction == "CALL"]
+    puts = [a for a in closed if a.direction == "PUT"]
+    recent = [
+        {"when": a.signal_ts.astimezone(NY).strftime("%m-%d %H:%M"),
+         "symbol": a.symbol, "dir": a.direction,
+         "return_pct": float(a.net_pct or 0),
+         "thesis": (a.meta or {}).get("thesis", "")[:80]}
+        for a in closed[:8]
+    ]
+    return {"overall": stats(closed), "calls": stats(calls),
+            "puts": stats(puts), "recent": recent}
 
 
 @skill(

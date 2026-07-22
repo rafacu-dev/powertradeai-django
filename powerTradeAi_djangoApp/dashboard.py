@@ -132,7 +132,11 @@ def replay_action(request):
 @staff_member_required
 @require_GET
 def agent_view(request):
-    from .models import AgentAnalysis, AgentRun
+    from decimal import Decimal
+
+    from django.db.models import Avg, Count, Q
+
+    from .models import AgentAnalysis, AgentRun, Alert
 
     runs = AgentRun.objects.all()[:30]
     # Ultimo analisis por activo (para el panel de continuidad).
@@ -140,9 +144,30 @@ def agent_view(request):
     for a in AgentAnalysis.objects.all()[:200]:
         latest.setdefault(a.symbol, a)
     analyses = sorted(latest.values(), key=lambda a: a.created_at, reverse=True)
+
+    # Expediente del agente: alertas suyas ya cerradas y puntuadas.
+    agent_alerts = Alert.objects.filter(source=Alert.Source.AGENT)
+    closed = agent_alerts.filter(status=Alert.Status.CLOSED)
+    agg = closed.aggregate(
+        n=Count("id"),
+        wins=Count("id", filter=Q(net_pct__gt=0)),
+        avg_pct=Avg("net_pct"),
+    )
+    n = agg["n"] or 0
+    track = {
+        "n": n,
+        "pending": agent_alerts.filter(status=Alert.Status.PENDING).count(),
+        "wins": agg["wins"] or 0,
+        "win_rate": round((agg["wins"] or 0) / n * 100, 1) if n else None,
+        "avg_pct": round(agg["avg_pct"], 2) if agg["avg_pct"] is not None else None,
+    }
+    recent_alerts = agent_alerts.select_related("strategy").order_by("-signal_ts")[:15]
+
     return render(request, "powertradeai/agent.html", {
         "runs": runs,
         "analyses": analyses,
+        "track": track,
+        "recent_alerts": recent_alerts,
     })
 
 

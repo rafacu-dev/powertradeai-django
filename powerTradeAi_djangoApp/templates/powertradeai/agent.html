@@ -81,6 +81,31 @@ header a:hover { color: var(--text); }
   margin-top: 4px; overflow-x: auto; font-size: 12px; white-space: pre-wrap;
   word-break: break-word; }
 .empty { color: var(--text-3); font-size: 13px; }
+
+/* ---- Expediente ---- */
+.track { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px; margin-bottom: 14px; }
+.tstat { background: var(--surface-2); border-radius: var(--radius); padding: 10px 12px; }
+.tlabel { font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+  color: var(--text-3); }
+.tval { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tval.pos { color: var(--green); }
+.tval.neg { color: var(--red); }
+.alist { display: flex; flex-direction: column; gap: 2px; }
+.arow { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+  border-bottom: 1px solid var(--border); font-size: 13px; }
+.arow:last-child { border-bottom: none; }
+.asym { font-weight: 600; min-width: 48px; }
+.adir { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 20px; }
+.adir.CALL { background: var(--surface-2); color: var(--green); }
+.adir.PUT { background: var(--surface-2); color: var(--red); }
+.awhen { color: var(--text-3); font-size: 12px; min-width: 92px; }
+.aret { font-weight: 600; font-variant-numeric: tabular-nums; min-width: 56px; }
+.aret.pos { color: var(--green); }
+.aret.neg { color: var(--red); }
+.apend { color: var(--amber); font-size: 12px; min-width: 56px; }
+.athesis { color: var(--text-2); font-size: 12px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 </style>
 </head>
 <body>
@@ -102,6 +127,36 @@ header a:hover { color: var(--text); }
       <span class="launch-status" id="launch-status"></span>
     </div>
     <div class="note">El agente razona con sus skills, guarda su análisis y solo lanza alertas si tiene una tesis clara. Requiere la API key del LLM configurada en el servidor.</div>
+  </div>
+
+  <div class="card">
+    <h2>Expediente del agente (acierto direccional)</h2>
+    <div class="track">
+      <div class="tstat"><div class="tlabel">Cerradas</div><div class="tval">{{ track.n }}</div></div>
+      <div class="tstat"><div class="tlabel">Win rate</div><div class="tval">{% if track.win_rate != None %}{{ track.win_rate }}%{% else %}—{% endif %}</div></div>
+      <div class="tstat"><div class="tlabel">Retorno medio</div><div class="tval {% if track.avg_pct > 0 %}pos{% elif track.avg_pct < 0 %}neg{% endif %}">{% if track.avg_pct != None %}{{ track.avg_pct }}%{% else %}—{% endif %}</div></div>
+      <div class="tstat"><div class="tlabel">Ganadoras</div><div class="tval pos">{{ track.wins }}</div></div>
+      <div class="tstat"><div class="tlabel">Pendientes</div><div class="tval">{{ track.pending }}</div></div>
+    </div>
+    {% if recent_alerts %}
+    <div class="alist">
+      {% for a in recent_alerts %}
+      <div class="arow">
+        <span class="asym">{{ a.symbol }}</span>
+        <span class="adir {{ a.direction }}">{{ a.direction }}</span>
+        <span class="awhen">{{ a.signal_ts|date:"d M H:i" }}</span>
+        {% if a.status == "closed" %}
+          <span class="aret {% if a.net_pct > 0 %}pos{% elif a.net_pct < 0 %}neg{% endif %}">{{ a.net_pct }}%</span>
+        {% else %}
+          <span class="apend">{{ a.get_status_display }}</span>
+        {% endif %}
+        <span class="athesis">{{ a.meta.thesis|default:"" }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">Sin alertas del agente todavía.</div>
+    {% endif %}
   </div>
 
   <div class="card">

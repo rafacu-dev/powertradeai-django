@@ -28,8 +28,9 @@ get_prior_analysis / save_analysis (tu vision por activo), y \
 get_notes / save_note (tu cuaderno de ideas y reglas).
 
 Metodo en cada corrida:
-1. Recupera tu contexto: get_prior_analysis y get_notes del activo. No empieces \
-de cero; continua tu razonamiento anterior.
+1. Recupera tu contexto: get_prior_analysis, get_notes y get_my_track_record \
+del activo. No empieces de cero; continua tu razonamiento anterior y se honesto \
+con como te ha ido (si tus PUTs van mal, se mas exigente con ellos).
 2. Lee el estado actual: get_intraday_stats y get_market_data. Mira el \
 historico si necesitas contexto.
 3. Antes de operar una idea, VALIDALA: usa backtest_reversion u otra evidencia; \

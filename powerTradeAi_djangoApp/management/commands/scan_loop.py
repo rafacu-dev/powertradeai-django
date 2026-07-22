@@ -95,6 +95,18 @@ class Command(BaseCommand):
             run = scan_once()
             self._report(run)
 
+            # Resolver las alertas del agente cuyo horizonte ya vencio
+            # (barato: una query filtrada). Las puntua contra precio real.
+            try:
+                from ...agent.resolver import resolve_agent_alerts
+                done = resolve_agent_alerts()
+                if done:
+                    self.stdout.write(
+                        f"[{now_ny():%H:%M:%S}] agente: {len(done)} "
+                        f"alerta(s) resuelta(s)")
+            except Exception:  # noqa: BLE001
+                log.exception("fallo el resolver del agente")
+
             # Piloto del agente: comparte el proceso. Sus tiradas estan
             # limitadas por min_gap, asi que solo corre de vez en cuando y no
             # frena al scanner en cada pasada.
