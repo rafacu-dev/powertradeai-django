@@ -7,7 +7,7 @@ En el proyecto anfitrion:
 from django.urls import path
 
 from .dashboard import (
-    agent_launch, agent_view, chart_data, chart_price, chart_view,
+    agent_launch, agent_view, chart_chat, chart_data, chart_price, chart_view,
     dashboard, replay_action, scanner_data,
 )
 
@@ -19,6 +19,7 @@ urlpatterns = [
     path("chart/", chart_view, name="chart"),
     path("chart/data/", chart_data, name="chart_data"),
     path("chart/price/", chart_price, name="chart_price"),
+    path("chart/chat/", chart_chat, name="chart_chat"),
     path("scanner/data/", scanner_data, name="scanner_data"),
     path("agent/", agent_view, name="agent"),
     path("agent/launch/", agent_launch, name="agent_launch"),

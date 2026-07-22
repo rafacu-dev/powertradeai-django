@@ -177,6 +177,34 @@ def chart_view(request):
 
 
 @staff_member_required
+@require_POST
+def chart_chat(request):
+    """Un turno de chat con el agente sobre el ticker del grafico."""
+    import json as _json
+
+    from .agent.runner import chat_agent
+
+    try:
+        payload = _json.loads(request.body or "{}")
+    except _json.JSONDecodeError:
+        payload = {}
+    symbol = (payload.get("symbol") or "SPY").upper()
+    message = (payload.get("message") or "").strip()
+    history = payload.get("history") or []
+    if not message:
+        return JsonResponse({"error": "mensaje vacio"}, status=400)
+    try:
+        run, reply = chat_agent(symbol, message, history=history)
+    except Exception as exc:
+        log.exception("chat del agente fallo")
+        return JsonResponse({"error": str(exc)}, status=500)
+    return JsonResponse({
+        "reply": reply, "run_id": run.id, "status": run.status,
+        "alerts_created": run.alerts_created,
+    })
+
+
+@staff_member_required
 @require_GET
 def chart_price(request):
     """Ultimo precio del ticker (1 sola llamada, para el poll rapido)."""

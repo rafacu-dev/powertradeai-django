@@ -173,6 +173,60 @@ header a {
   color: var(--text-2);
   font-weight: 600;
 }
+
+/* ---- Chat con el agente ---- */
+#chat-fab {
+  position: fixed; right: 20px; bottom: 20px; z-index: 40;
+  width: 52px; height: 52px; border-radius: 50%; border: none;
+  background: var(--accent); color: #fff; font-size: 22px; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+}
+#chat-drawer {
+  position: fixed; top: 0; right: 0; z-index: 50;
+  width: 370px; max-width: 92vw; height: 100vh;
+  background: var(--surface); border-left: 1px solid var(--border);
+  display: none; flex-direction: column;
+  box-shadow: -6px 0 24px rgba(0,0,0,0.25);
+}
+#chat-drawer.open { display: flex; }
+.chat-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 14px;
+}
+.chat-head strong { color: var(--accent); }
+.chat-close {
+  background: none; border: none; color: var(--text-3); font-size: 16px;
+  cursor: pointer;
+}
+.chat-msgs {
+  flex: 1; overflow-y: auto; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.chat-hint { color: var(--text-3); font-size: 12px; line-height: 1.5; }
+.bubble {
+  max-width: 85%; padding: 8px 12px; border-radius: 12px; font-size: 13px;
+  line-height: 1.45; white-space: pre-wrap; word-break: break-word;
+}
+.bubble.user { align-self: flex-end; background: var(--accent); color: #fff;
+  border-bottom-right-radius: 4px; }
+.bubble.bot { align-self: flex-start; background: var(--bg);
+  border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.bubble.bot.thinking { color: var(--text-3); font-style: italic; }
+.bubble .meta { display: block; margin-top: 4px; font-size: 11px;
+  color: var(--text-3); }
+.chat-input {
+  display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border);
+}
+.chat-input textarea {
+  flex: 1; resize: none; max-height: 120px; padding: 9px 11px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
+  color: var(--text); font-size: 13px; font-family: inherit;
+}
+.chat-input button {
+  border: none; border-radius: 10px; background: var(--accent); color: #fff;
+  width: 42px; font-size: 16px; cursor: pointer;
+}
+.chat-input button:disabled { opacity: 0.5; cursor: default; }
 </style>
 </head>
 <body>
@@ -204,6 +258,22 @@ header a {
 
   <div class="legend" id="ma-legend"></div>
   <div class="htf-legend" id="htf-legend"></div>
+</div>
+
+<!-- Chat con el agente, sobre el ticker del grafico -->
+<button id="chat-fab" onclick="toggleChat()" title="Chat con el agente">💬</button>
+<div id="chat-drawer">
+  <div class="chat-head">
+    <span>Agente · <strong id="chat-symbol">SPY</strong></span>
+    <button class="chat-close" onclick="toggleChat()">✕</button>
+  </div>
+  <div class="chat-msgs" id="chat-msgs">
+    <div class="chat-hint">Pregúntale al agente sobre <span id="chat-hint-sym">SPY</span>: “¿sesgo ahora?”, “¿cómo está vs VWAP?”, “vigílame 400”.</div>
+  </div>
+  <div class="chat-input">
+    <textarea id="chat-text" rows="1" placeholder="Escribe..." onkeydown="chatKey(event)"></textarea>
+    <button id="chat-send" onclick="sendChat()">➤</button>
+  </div>
 </div>
 
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -578,6 +648,77 @@ document.getElementById('auto-btn').addEventListener('click', () => {
   autoInterval ? stopAuto() : startAuto();
 });
 startAuto();
+
+// ── Chat con el agente ──────────────────────────────────────────────
+let chatHistory = [];
+
+function currentSym() {
+  return document.getElementById('symbol').value.trim().toUpperCase() || 'SPY';
+}
+function toggleChat() {
+  const d = document.getElementById('chat-drawer');
+  d.classList.toggle('open');
+  if (d.classList.contains('open')) {
+    const sym = currentSym();
+    document.getElementById('chat-symbol').textContent = sym;
+    document.getElementById('chat-hint-sym').textContent = sym;
+    document.getElementById('chat-text').focus();
+  }
+}
+function chatKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+}
+function addBubble(cls, text) {
+  const el = document.createElement('div');
+  el.className = 'bubble ' + cls;
+  el.textContent = text;
+  document.getElementById('chat-msgs').appendChild(el);
+  const box = document.getElementById('chat-msgs');
+  box.scrollTop = box.scrollHeight;
+  return el;
+}
+function getCookie(name) {
+  const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+  return m ? m.pop() : '';
+}
+async function sendChat() {
+  const input = document.getElementById('chat-text');
+  const btn = document.getElementById('chat-send');
+  const msg = input.value.trim();
+  if (!msg) return;
+  const sym = currentSym();
+  document.getElementById('chat-symbol').textContent = sym;
+
+  addBubble('user', msg);
+  chatHistory.push({role: 'user', content: msg});
+  input.value = '';
+  btn.disabled = true;
+  const thinking = addBubble('bot thinking', 'pensando…');
+
+  try {
+    const resp = await fetch("{% url 'powertradeai:chart_chat' %}", {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken')},
+      body: JSON.stringify({symbol: sym, message: msg, history: chatHistory.slice(0, -1)}),
+    });
+    const d = await resp.json();
+    thinking.remove();
+    if (!resp.ok) { addBubble('bot', 'Error: ' + (d.error || resp.status)); return; }
+    const bot = addBubble('bot', d.reply || '(sin respuesta)');
+    if (d.alerts_created) {
+      const m = document.createElement('span');
+      m.className = 'meta'; m.textContent = `⚑ ${d.alerts_created} alerta(s) creada(s)`;
+      bot.appendChild(m);
+    }
+    chatHistory.push({role: 'assistant', content: d.reply || ''});
+  } catch (err) {
+    thinking.remove();
+    addBubble('bot', 'Error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    input.focus();
+  }
+}
 </script>
 </body>
 </html>
