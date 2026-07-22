@@ -74,6 +74,11 @@ def _alert_source(ctx):
     return Alert.Source.AGENT_TRAIN if _is_training(ctx) else Alert.Source.AGENT
 
 
+def _mode(ctx) -> str:
+    """Aisla la memoria: 'train' en entrenamiento, 'live' en vivo."""
+    return "train" if _is_training(ctx) else "live"
+
+
 def _price_asof(provider, symbol, as_of):
     """Ultimo precio conocido en/antes de ``as_of`` (cierre de la vela de 1m).
     Antes de la apertura, el ultimo cierre diario previo. None si no hay dato."""
@@ -301,14 +306,20 @@ def get_option_quote(ctx, symbol: str, right: str, dte: int = 0):
 )
 def get_prior_analysis(ctx, symbol: str, limit: int = 3):
     from ..models import AgentAnalysis
-    qs = AgentAnalysis.objects.filter(symbol=symbol.upper())[: min(int(limit), 5)]
+    qs = AgentAnalysis.objects.filter(symbol=symbol.upper(), mode=_mode(ctx))
+    as_of = ctx.get("as_of")
+    if as_of is not None:
+        # Solo lo escrito hasta este instante simulado (sin futuro).
+        qs = qs.filter(as_of__isnull=False, as_of__lte=as_of).order_by("-as_of")
+    qs = qs[: min(int(limit), 5)]
+
+    def _when(a):
+        t = a.as_of or a.created_at
+        return t.astimezone(NY).strftime("%Y-%m-%d %H:%M")
     return {
         "symbol": symbol.upper(),
         "prior": [
-            {
-                "when": a.created_at.astimezone(NY).strftime("%Y-%m-%d %H:%M"),
-                "stance": a.stance, "analysis": a.analysis,
-            }
+            {"when": _when(a), "stance": a.stance, "analysis": a.analysis}
             for a in qs
         ],
     }
@@ -334,7 +345,7 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
     from ..models import AgentAnalysis
     AgentAnalysis.objects.create(
         symbol=symbol.upper(), analysis=analysis, stance=stance,
-        agent_run=ctx["run"],
+        agent_run=ctx["run"], mode=_mode(ctx), as_of=ctx.get("as_of"),
     )
     return {"saved": True, "symbol": symbol.upper()}
 
@@ -627,7 +638,9 @@ def backtest_reversion(ctx, symbol: str, days: int = 15, max_hold_bars: int = 8)
 )
 def save_note(ctx, topic: str, note: str):
     from ..models import AgentNote
-    AgentNote.objects.create(topic=topic.strip()[:80], note=note, agent_run=ctx["run"])
+    AgentNote.objects.create(
+        topic=topic.strip()[:80], note=note, agent_run=ctx["run"],
+        mode=_mode(ctx), as_of=ctx.get("as_of"))
     return {"saved": True, "topic": topic.strip()[:80]}
 
 
@@ -648,6 +661,9 @@ def get_open_positions(ctx, symbol: str | None = None):
                               status=Alert.Status.PENDING)
     if symbol:
         qs = qs.filter(symbol=symbol.upper())
+    as_of = ctx.get("as_of")
+    if as_of is not None:
+        qs = qs.filter(entry_ts__isnull=False, entry_ts__lte=as_of)
     out = []
     now = _now(ctx)
     for a in qs:
@@ -785,6 +801,10 @@ def get_my_track_record(ctx, symbol: str | None = None):
                               status=Alert.Status.CLOSED)
     if symbol:
         qs = qs.filter(symbol=symbol.upper())
+    as_of = ctx.get("as_of")
+    if as_of is not None:
+        # Solo lo cerrado hasta este instante simulado.
+        qs = qs.filter(exit_ts__isnull=False, exit_ts__lte=as_of)
     closed = list(qs.order_by("-signal_ts")[:200])
     n = len(closed)
     if not n:
@@ -846,7 +866,7 @@ def set_price_trigger(ctx, symbol: str, price: float, reason: str,
     t = AgentTrigger.objects.create(
         symbol=sym, price=round(float(price), 2), direction=direction,
         reason=reason, ref_price=round(ref, 2) if ref else None,
-        agent_run=ctx["run"],
+        agent_run=ctx["run"], mode=_mode(ctx),
     )
     return {"trigger_id": t.id, "symbol": sym, "price": t.price,
             "direction": direction, "ref_price": t.ref_price}
@@ -864,7 +884,8 @@ def set_price_trigger(ctx, symbol: str, price: float, reason: str,
 )
 def list_price_triggers(ctx, symbol: str):
     from ..models import AgentTrigger
-    qs = AgentTrigger.objects.filter(symbol=symbol.upper(), active=True)
+    qs = AgentTrigger.objects.filter(symbol=symbol.upper(), active=True,
+                                     mode=_mode(ctx))
     return {
         "symbol": symbol.upper(),
         "triggers": [
@@ -886,7 +907,8 @@ def list_price_triggers(ctx, symbol: str):
 )
 def cancel_price_trigger(ctx, trigger_id: int):
     from ..models import AgentTrigger
-    n = AgentTrigger.objects.filter(id=trigger_id, active=True).update(active=False)
+    n = AgentTrigger.objects.filter(
+        id=trigger_id, active=True, mode=_mode(ctx)).update(active=False)
     return {"cancelled": bool(n), "trigger_id": trigger_id}
 
 
@@ -904,11 +926,15 @@ def cancel_price_trigger(ctx, trigger_id: int):
 )
 def get_notes(ctx, topic: str, limit: int = 5):
     from ..models import AgentNote
-    qs = AgentNote.objects.filter(topic=topic.strip()[:80])[: min(int(limit), 10)]
+    qs = AgentNote.objects.filter(topic=topic.strip()[:80], mode=_mode(ctx))
+    as_of = ctx.get("as_of")
+    if as_of is not None:
+        qs = qs.filter(as_of__isnull=False, as_of__lte=as_of).order_by("-as_of")
+    qs = qs[: min(int(limit), 10)]
     return {
         "topic": topic.strip()[:80],
         "notes": [
-            {"when": n.created_at.astimezone(NY).strftime("%Y-%m-%d %H:%M"),
+            {"when": (n.as_of or n.created_at).astimezone(NY).strftime("%Y-%m-%d %H:%M"),
              "note": n.note}
             for n in qs
         ],

@@ -328,6 +328,11 @@ class AgentAnalysis(models.Model):
     stance = models.CharField(
         max_length=16, blank=True,
         help_text="Sesgo: alcista / bajista / neutral / observando.")
+    # Aisla la memoria del agente vivo de la de entrenamiento. En 'train',
+    # ``as_of`` es el instante simulado en que se escribio (para acotar
+    # lecturas causalmente y no leer el futuro).
+    mode = models.CharField(max_length=8, default="live", db_index=True)
+    as_of = models.DateTimeField(null=True, blank=True)
     agent_run = models.ForeignKey(
         AgentRun, on_delete=models.CASCADE, related_name="analyses")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -347,6 +352,8 @@ class AgentNote(models.Model):
 
     topic = models.CharField(max_length=80, db_index=True)
     note = models.TextField()
+    mode = models.CharField(max_length=8, default="live", db_index=True)
+    as_of = models.DateTimeField(null=True, blank=True)
     agent_run = models.ForeignKey(
         AgentRun, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="notes")
@@ -372,6 +379,8 @@ class AgentTrigger(models.Model):
     symbol = models.CharField(max_length=16, db_index=True)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     direction = models.CharField(max_length=8, choices=Direction.choices)
+    # 'live' o 'train': el autopilot en vivo ignora los de entrenamiento.
+    mode = models.CharField(max_length=8, default="live", db_index=True)
     reason = models.TextField(
         blank=True, help_text="Que espera el agente en ese nivel / que hara.")
     ref_price = models.DecimalField(

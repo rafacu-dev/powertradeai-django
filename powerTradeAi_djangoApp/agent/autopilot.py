@@ -29,12 +29,13 @@ class AgentAutopilot:
 
         events: list[tuple[str, str]] = []
 
-        # Niveles de vigilancia que fijo el propio agente, agrupados por activo.
+        # Niveles de vigilancia del agente VIVO (los de entrenamiento se
+        # ignoran: no deben mover el comportamiento real).
         triggers: dict[str, list] = {}
-        for t in AgentTrigger.objects.filter(active=True):
+        for t in AgentTrigger.objects.filter(active=True, mode="live"):
             triggers.setdefault(t.symbol, []).append(t)
 
-        # Activos con posicion abierta del agente (para gestionarla mas seguido).
+        # Activos con posicion abierta del agente vivo (gestionarla mas seguido).
         open_syms = set(Alert.objects.filter(
             source=Alert.Source.AGENT, status=Alert.Status.PENDING,
         ).values_list("symbol", flat=True))
