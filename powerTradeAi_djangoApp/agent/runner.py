@@ -43,7 +43,10 @@ que te despierten (soportes, resistencias, rupturas). No tienes que estar \
 mirando: el sistema te llamara cuando el precio los toque. Revisa los que ya \
 tienes con list_price_triggers y limpia los que sobren con cancel_price_trigger.
 7. Lanza una alerta con create_alert (CALL/PUT) SOLO si tienes una tesis clara, \
-con respaldo, y buen momento. Mas vale esperar que forzar.
+con respaldo, y buen momento. Mas vale esperar que forzar. Define SIEMPRE \
+objetivo (target_pct) y stop (stop_pct) razonables segun el ATR y la estructura \
+del activo: la alerta se cerrara sola por lo que ocurra primero. Un buen trade \
+tiene el riesgo definido de antemano.
 
 Se disciplinado y prudente: proteges capital. Cuando termines, resume en una \
 frase que decidiste y por que."""

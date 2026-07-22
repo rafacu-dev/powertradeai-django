@@ -36,23 +36,55 @@ def _price_at(provider, symbol: str, ts):
     return float(row["close"])
 
 
+def _walk_target_stop(direction, entry, seg, target_pct, stop_pct):
+    """Recorre las velas de ``seg`` buscando el primer toque de objetivo o stop.
+
+    Devuelve (reason, exit_price, exit_ts) o None si no se toca ninguno. Si en
+    la misma vela se tocan ambos, asume el STOP (conservador, sin over-fit)."""
+    if not target_pct and not stop_pct:
+        return None
+    is_call = direction == "CALL"
+    tgt = stp = None
+    if target_pct:
+        tgt = entry * (1 + target_pct / 100) if is_call else entry * (1 - target_pct / 100)
+    if stop_pct:
+        stp = entry * (1 - stop_pct / 100) if is_call else entry * (1 + stop_pct / 100)
+
+    for ts, row in seg.iterrows():
+        hi, lo = float(row["high"]), float(row["low"])
+        if is_call:
+            stop_hit = stp is not None and lo <= stp
+            tgt_hit = tgt is not None and hi >= tgt
+        else:
+            stop_hit = stp is not None and hi >= stp
+            tgt_hit = tgt is not None and lo <= tgt
+        if stop_hit and tgt_hit:
+            return ("stop", stp, ts)
+        if stop_hit:
+            return ("stop", stp, ts)
+        if tgt_hit:
+            return ("target", tgt, ts)
+    return None
+
+
 def resolve_agent_alerts(now=None) -> list:
-    """Cierra las alertas del agente cuyo horizonte ya vencio. Devuelve las
-    cerradas."""
+    """Cierra las alertas del agente por objetivo/stop (lo que ocurra primero)
+    o, si no se tocan, al vencer el horizonte. Devuelve las cerradas."""
     from django.utils import timezone
 
     from ..data import get_provider
     from ..models import Alert
 
     now = now or timezone.now()
-    pending = Alert.objects.filter(
+    pending = list(Alert.objects.filter(
         source=Alert.Source.AGENT, status=Alert.Status.PENDING,
-        scheduled_exit_ts__isnull=False, scheduled_exit_ts__lte=now,
-    )
-    if not pending.exists():
+        entry_ts__isnull=False, scheduled_exit_ts__isnull=False,
+    ))
+    if not pending:
         return []
 
     provider = get_provider()
+    bars_cache: dict = {}
     closed = []
     for a in pending:
         entry = a.underlying_at_signal
@@ -60,28 +92,51 @@ def resolve_agent_alerts(now=None) -> list:
             entry = (a.meta or {}).get("entry_price")
         entry = float(entry) if entry is not None else None
         if not entry:
-            # Sin precio de entrada no hay como puntuar: la marcamos error.
             a.status = Alert.Status.ERROR
             a.exit_reason = "sin_entrada"
             a.save(update_fields=["status", "exit_reason", "updated_at"])
             continue
 
-        exit_price = _price_at(provider, a.symbol, a.scheduled_exit_ts)
-        if exit_price is None:
-            continue  # aun no hay dato; se reintenta en la proxima pasada
+        key = (a.symbol, a.session_date)
+        if key not in bars_cache:
+            try:
+                bars_cache[key] = provider.bars(
+                    a.symbol, a.session_date, a.session_date, "1m")
+            except Exception:
+                bars_cache[key] = None
+        bars = bars_cache[key]
+        if bars is None or bars.empty:
+            continue
+
+        meta = dict(a.meta or {})
+        window_end = min(a.scheduled_exit_ts, now)
+        seg = bars[(bars.index >= a.entry_ts) & (bars.index <= window_end)]
+
+        outcome = _walk_target_stop(
+            a.direction, entry, seg, meta.get("target_pct"), meta.get("stop_pct"))
+
+        if outcome is None:
+            # No se toco objetivo ni stop. Cerrar al horizonte si ya vencio.
+            if now < a.scheduled_exit_ts:
+                continue  # sigue viva
+            exit_price = _price_at(provider, a.symbol, a.scheduled_exit_ts)
+            if exit_price is None:
+                continue
+            reason, exit_ts = "horizonte", a.scheduled_exit_ts
+        else:
+            reason, exit_price, exit_ts = outcome
 
         move_pct = (exit_price - entry) / entry * 100
         ret = move_pct if a.direction == Alert.Direction.CALL else -move_pct
 
         a.status = Alert.Status.CLOSED
-        a.exit_ts = a.scheduled_exit_ts
-        a.exit_reason = "horizonte"
+        a.exit_ts = exit_ts
+        a.exit_reason = reason
         a.net_pct = round(ret, 2)
-        meta = dict(a.meta or {})
         meta.update({"exit_price": round(exit_price, 2),
                      "move_pct": round(move_pct, 2),
                      "return_pct": round(ret, 2),
-                     "win": ret > 0})
+                     "win": ret > 0, "exit_reason": reason})
         a.meta = meta
         a.save(update_fields=[
             "status", "exit_ts", "exit_reason", "net_pct", "meta", "updated_at"])

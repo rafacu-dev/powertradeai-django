@@ -104,6 +104,9 @@ header a:hover { color: var(--text); }
 .aret.pos { color: var(--green); }
 .aret.neg { color: var(--red); }
 .apend { color: var(--amber); font-size: 12px; min-width: 56px; }
+.areason { font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px;
+  color: var(--text-3); background: var(--surface-2); padding: 1px 6px;
+  border-radius: 4px; }
 .athesis { color: var(--text-2); font-size: 12px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 </style>
@@ -147,6 +150,7 @@ header a:hover { color: var(--text); }
         <span class="awhen">{{ a.signal_ts|date:"d M H:i" }}</span>
         {% if a.status == "closed" %}
           <span class="aret {% if a.net_pct > 0 %}pos{% elif a.net_pct < 0 %}neg{% endif %}">{{ a.net_pct }}%</span>
+          {% if a.exit_reason %}<span class="areason">{{ a.exit_reason }}</span>{% endif %}
         {% else %}
           <span class="apend">{{ a.get_status_display }}</span>
         {% endif %}

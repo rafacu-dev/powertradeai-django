@@ -291,12 +291,20 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
             "horizon_minutes": {"type": "integer",
                                 "description": "Cuanto tiempo vale tu tesis "
                                                "(def. 120; se acota al cierre)."},
+            "target_pct": {"type": "number",
+                           "description": "Objetivo de ganancia en %% del "
+                                          "movimiento del subyacente (opcional)."},
+            "stop_pct": {"type": "number",
+                         "description": "Stop de perdida en %% del movimiento "
+                                        "del subyacente (opcional, positivo)."},
         },
         "required": ["symbol", "direction", "thesis"],
     },
 )
 def create_alert(ctx, symbol: str, direction: str, thesis: str,
-                 horizon_minutes: int = 120):
+                 horizon_minutes: int = 120,
+                 target_pct: float | None = None,
+                 stop_pct: float | None = None):
     from django.utils import timezone
 
     from ..models import Alert, Strategy
@@ -332,11 +340,16 @@ def create_alert(ctx, symbol: str, direction: str, thesis: str,
             "scheduled_exit_ts": exit_at, "agent_run": ctx["run"],
             "underlying_at_signal": spot,
             "meta": {"thesis": thesis, "by": "agent",
-                     "entry_price": spot, "horizon_minutes": horizon},
+                     "entry_price": spot, "horizon_minutes": horizon,
+                     "target_pct": (round(float(target_pct), 3)
+                                    if target_pct else None),
+                     "stop_pct": (round(abs(float(stop_pct)), 3)
+                                  if stop_pct else None)},
         },
     )
     return {"alert_id": alert.id, "created": created, "symbol": sym,
             "direction": direction, "entry_price": spot,
+            "target_pct": target_pct, "stop_pct": stop_pct,
             "resolves_at": exit_at.astimezone(NY).strftime("%H:%M")}
 
 
