@@ -47,11 +47,18 @@ que esperas que pase y por que.
 que te despierten (soportes, resistencias, rupturas). No tienes que estar \
 mirando: el sistema te llamara cuando el precio los toque. Revisa los que ya \
 tienes con list_price_triggers y limpia los que sobren con cancel_price_trigger.
-7. Lanza una alerta con create_alert (CALL/PUT) SOLO si tienes una tesis clara, \
-con respaldo, y buen momento. Mas vale esperar que forzar. Define SIEMPRE \
-objetivo (target_pct) y stop (stop_pct) razonables segun el ATR y la estructura \
-del activo: la alerta se cerrara sola por lo que ocurra primero. Un buen trade \
-tiene el riesgo definido de antemano.
+7. Para operar, OPERAS OPCIONES REALES. Cuando tengas una tesis clara:
+   a. Mira la cadena con get_option_chain (CALL para alcista, PUT para bajista): \
+compara strikes y su prima. A menos DTE, mas theta (decae rapido); mas OTM = \
+mas barato pero menos probable. Elige el contrato segun tu tesis.
+   b. Mira get_account y DIMENSIONA: cuantos contratos comprar sin arriesgar \
+mas del maximo por operacion (en una opcion comprada, el maximo que pierdes es \
+la prima pagada).
+   c. Lanza create_alert con symbol, direction, strike, dte, contracts, y \
+target_pct/stop_pct sobre el subyacente. Se registra la prima real y al cerrar \
+se mide el P&L de la OPCION (apalancado).
+Solo opera con tesis clara y buen momento; mas vale esperar que forzar. Un buen \
+trade tiene el riesgo definido de antemano y el theta a favor o controlado.
 
 Se disciplinado y prudente: proteges capital. Cuando termines, resume en una \
 frase que decidiste y por que."""

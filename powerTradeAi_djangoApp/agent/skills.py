@@ -246,10 +246,26 @@ def scan_bollinger(ctx, symbols: list[str]):
     return {"scanned": rows}
 
 
+def _strike_step(spot: float) -> float:
+    return 5.0 if spot >= 200 else 2.5 if spot >= 50 else 1.0
+
+
+def _pick_expiration(ctx, sym, dte):
+    from ..data import candidate_expirations
+    today = _now(ctx).date()
+    exps = candidate_expirations(today, max_dte=max(int(dte) + 5, 7))
+    if not exps:
+        return None, None
+    target = min(exps, key=lambda e: abs((e - today).days - int(dte)))
+    return target, (target - today).days
+
+
 @skill(
-    "get_option_quote",
-    "Quote de un contrato de opciones cercano al dinero (ATM) para el activo, "
-    "eligiendo la expiracion mas proxima segun los dias al vencimiento pedidos.",
+    "get_option_chain",
+    "Cadena de opciones: varios strikes alrededor del dinero para el activo, "
+    "con su bid/ask y prima, para que ELIJAS el contrato. Devuelve tambien los "
+    "dias al vencimiento (DTE): a menos DTE, mas theta (decae rapido). Con esto "
+    "decides strike y expiracion segun tu tesis y el riesgo.",
     {
         "type": "object",
         "properties": {
@@ -261,31 +277,76 @@ def scan_bollinger(ctx, symbols: list[str]):
         "required": ["symbol", "right"],
     },
 )
-def get_option_quote(ctx, symbol: str, right: str, dte: int = 0):
-    from ..data import candidate_expirations, occ_symbol
+def get_option_chain(ctx, symbol: str, right: str, dte: int = 0):
+    from ..data import occ_symbol
     provider = _provider()
     sym = symbol.upper()
     try:
         spot = _spot(ctx, provider, sym)
     except Exception as exc:
         return {"error": f"sin precio del subyacente: {exc}"}
-    strike = round(spot)
-    today = _now(ctx).date()
-    exps = candidate_expirations(today, max_dte=max(int(dte) + 5, 7))
-    if not exps:
+    target, real_dte = _pick_expiration(ctx, sym, dte)
+    if target is None:
         return {"error": "sin expiraciones candidatas"}
-    target = min(exps, key=lambda e: abs((e - today).days - int(dte)))
-    occ = occ_symbol(sym, target, right, strike)
-    at = ctx.get("as_of")  # quote historica al instante si entrenamos
-    try:
-        q = provider.option_quote(occ, at=at) if at else provider.option_quote(occ)
-    except Exception as exc:
-        return {"error": f"sin quote: {exc}", "occ": occ}
-    if q is None:
-        return {"error": "quote vacia", "occ": occ}
+    at = ctx.get("as_of")
+    step = _strike_step(spot)
+    atm = round(spot / step) * step
+    strikes = [atm + i * step for i in range(-2, 3)]
+    rows = []
+    for k in strikes:
+        occ = occ_symbol(sym, target, right, k)
+        try:
+            q = provider.option_quote(occ, at=at) if at else provider.option_quote(occ)
+        except Exception:
+            q = None
+        if q is None:
+            continue
+        bid, ask = getattr(q, "bid", None), getattr(q, "ask", None)
+        rows.append({
+            "strike": k, "bid": bid, "ask": ask,
+            "mid": round((bid + ask) / 2, 2) if bid and ask else None,
+            "cost_1_contrato": round(ask * 100, 2) if ask else None,
+            "moneyness": ("ITM" if (right == "CALL" and k < spot) or
+                          (right == "PUT" and k > spot) else
+                          "ATM" if abs(k - spot) < step else "OTM"),
+        })
+    return {"symbol": sym, "right": right, "spot": round(spot, 2),
+            "expiration": str(target), "dte": real_dte,
+            "theta_aviso": "0 DTE = maximo theta, decae en horas" if real_dte == 0
+            else f"{real_dte} DTE",
+            "strikes": rows}
+
+
+@skill(
+    "get_account",
+    "Estado de tu cuenta (papel): tamano, capital ya desplegado en posiciones "
+    "abiertas, disponible, y el riesgo maximo sugerido por operacion. Usalo "
+    "para dimensionar cuantos contratos comprar sin arriesgar de mas.",
+    {"type": "object", "properties": {}},
+)
+def get_account(ctx):
+    from django.conf import settings
+
+    from ..models import Alert
+    cfg = getattr(settings, "POWERTRADEAI", {})
+    size = float(cfg.get("PAPER_ACCOUNT", 10000))
+    risk_pct = float(cfg.get("RISK_PCT_PER_TRADE", 2.0))
+    open_qs = Alert.objects.filter(source=_alert_source(ctx),
+                                   status=Alert.Status.PENDING)
+    deployed = 0.0
+    for a in open_qs:
+        cost = (a.meta or {}).get("cost")
+        if cost:
+            deployed += float(cost)
     return {
-        "occ": occ, "expiration": str(target), "strike": strike, "right": right,
-        "bid": getattr(q, "bid", None), "ask": getattr(q, "ask", None),
+        "account_size": round(size, 2),
+        "deployed": round(deployed, 2),
+        "available": round(size - deployed, 2),
+        "risk_pct_per_trade": risk_pct,
+        "max_risk_per_trade": round(size * risk_pct / 100, 2),
+        "nota": "El maximo que puedes perder en una opcion comprada es la prima "
+                "pagada; dimensiona los contratos para no arriesgar mas del "
+                "maximo sugerido.",
     }
 
 
@@ -352,51 +413,79 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
 
 @skill(
     "create_alert",
-    "Registra una alerta marcada como generada por el agente: es una PREDICCION "
-    "con fecha de vencimiento que luego se puntua sola. Indica el horizonte en "
-    "minutos (cuanto vale tu tesis). Aparece en el dashboard con tu razonamiento. "
-    "Usala solo cuando tengas una tesis clara y accionable.",
+    "Compra una OPCION real (CALL o PUT) y registra la operacion. TU eliges el "
+    "contrato: strike, dias al vencimiento (dte) y cuantos contratos, segun tu "
+    "tesis y la gestion de riesgo (mira get_option_chain y get_account primero). "
+    "Se registra la prima de entrada (ask) real de ThetaData; al cerrar se mide "
+    "el P&L de la opcion (bid), con su apalancamiento. target/stop son sobre el "
+    "movimiento del SUBYACENTE (tu tesis de precio); el resultado es de la opcion.",
     {
         "type": "object",
         "properties": {
             "symbol": {"type": "string"},
             "direction": {"type": "string", "enum": ["CALL", "PUT"]},
-            "thesis": {"type": "string",
-                       "description": "Por que lanzas la alerta, en breve."},
+            "thesis": {"type": "string", "description": "Por que operas, en breve."},
+            "strike": {"type": "number",
+                       "description": "Strike del contrato (si lo omites, ATM)."},
+            "dte": {"type": "integer",
+                    "description": "Dias al vencimiento (0 = mismo dia; a menos "
+                                   "DTE mas theta)."},
+            "contracts": {"type": "integer",
+                          "description": "Cuantos contratos (sizing/riesgo)."},
             "horizon_minutes": {"type": "integer",
-                                "description": "Cuanto tiempo vale tu tesis "
-                                               "(def. 120; se acota al cierre)."},
+                                "description": "Cuanto vale tu tesis (def. 120)."},
             "target_pct": {"type": "number",
-                           "description": "Objetivo de ganancia en %% del "
-                                          "movimiento del subyacente (opcional)."},
+                           "description": "Objetivo en %% del SUBYACENTE (opcional)."},
             "stop_pct": {"type": "number",
-                         "description": "Stop de perdida en %% del movimiento "
-                                        "del subyacente (opcional, positivo)."},
+                         "description": "Stop en %% del SUBYACENTE (opcional)."},
         },
         "required": ["symbol", "direction", "thesis"],
     },
 )
 def create_alert(ctx, symbol: str, direction: str, thesis: str,
+                 strike: float | None = None, dte: int = 0, contracts: int = 1,
                  horizon_minutes: int = 120,
                  target_pct: float | None = None,
                  stop_pct: float | None = None):
+    from ..data import occ_symbol
     from ..models import Alert, Strategy
     sym = symbol.upper()
     provider = _provider()
     try:
         spot = _spot(ctx, provider, sym)
     except Exception:
-        spot = None
+        return {"error": "sin precio del subyacente"}
+
+    # Elegir el contrato: strike (ATM si no se da) + expiracion segun dte.
+    step = _strike_step(spot)
+    if strike is None:
+        strike = round(spot / step) * step
+    strike = round(float(strike), 2)
+    target_exp, real_dte = _pick_expiration(ctx, sym, dte)
+    if target_exp is None:
+        return {"error": "sin expiraciones candidatas"}
+    occ = occ_symbol(sym, target_exp, direction, strike)
+
+    # Prima de entrada REAL (ask) via ThetaData.
+    at = ctx.get("as_of")
+    try:
+        q = provider.option_quote(occ, at=at) if at else provider.option_quote(occ)
+    except Exception as exc:
+        return {"error": f"sin quote del contrato: {exc}", "occ": occ}
+    if q is None or not getattr(q, "ask", None):
+        return {"error": "el contrato no tiene quote utilizable; prueba otro "
+                         "strike o dte", "occ": occ}
+    entry_ask = float(q.ask)
+    entry_bid = float(getattr(q, "bid", 0) or 0)
+    contracts = max(int(contracts or 1), 1)
+    cost = round(entry_ask * 100 * contracts, 2)
 
     training = _is_training(ctx)
     source = _alert_source(ctx)
     strategy, _ = Strategy.objects.get_or_create(
         strategy_id=f"AGENT:{sym}",
-        defaults={
-            "name": f"Agente {sym}", "symbol": sym,
-            "rule_version": "agent_v1", "enabled": False,
-        },
-    )
+        defaults={"name": f"Agente {sym}", "symbol": sym,
+                  "rule_version": "agent_v1", "enabled": False})
     now = _now(ctx)
     today = now.astimezone(NY).date()
     horizon = max(int(horizon_minutes or 120), 5)
@@ -404,18 +493,20 @@ def create_alert(ctx, symbol: str, direction: str, thesis: str,
                                 tzinfo=NY)
     exit_at = min(now + timedelta(minutes=horizon), close_dt)
     meta = {"thesis": thesis, "by": "agent", "entry_price": spot,
-            "horizon_minutes": horizon,
+            "horizon_minutes": horizon, "dte": real_dte, "cost": cost,
             "target_pct": round(float(target_pct), 3) if target_pct else None,
             "stop_pct": round(abs(float(stop_pct)), 3) if stop_pct else None,
             "training": training}
     common = {
         "rule_version": "agent_v1", "symbol": sym,
-        "status": Alert.Status.PENDING, "signal_ts": now,
-        "detected_at": now, "entry_ts": now, "scheduled_exit_ts": exit_at,
-        "agent_run": ctx["run"], "underlying_at_signal": spot, "meta": meta,
+        "status": Alert.Status.PENDING, "signal_ts": now, "detected_at": now,
+        "entry_ts": now, "scheduled_exit_ts": exit_at, "agent_run": ctx["run"],
+        "underlying_at_signal": spot, "occ_symbol": occ,
+        "expiration": target_exp, "strike": strike, "contracts": contracts,
+        "entry_ask": entry_ask, "entry_bid": entry_bid,
+        "entry_premium": entry_ask, "meta": meta,
     }
     if training:
-        # En entrenamiento el agente puede tomar varias operaciones por dia.
         alert = Alert.objects.create(
             strategy=strategy, session_date=today, direction=direction,
             source=source, **common)
@@ -425,8 +516,9 @@ def create_alert(ctx, symbol: str, direction: str, thesis: str,
             strategy=strategy, session_date=today, direction=direction,
             source=source, defaults=common)
     return {"alert_id": alert.id, "created": created, "symbol": sym,
-            "direction": direction, "entry_price": spot,
-            "target_pct": target_pct, "stop_pct": stop_pct,
+            "direction": direction, "contract": occ, "strike": strike,
+            "dte": real_dte, "contracts": contracts,
+            "entry_premium": entry_ask, "cost": cost,
             "resolves_at": exit_at.astimezone(NY).strftime("%H:%M")}
 
 

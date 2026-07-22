@@ -136,19 +136,59 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
         else:
             reason, exit_price, exit_ts = outcome
 
+        # Movimiento del subyacente (referencia de la tesis).
         move_pct = (exit_price - entry) / entry * 100
-        ret = move_pct if a.direction == Alert.Direction.CALL else -move_pct
+        und_ret = move_pct if a.direction == Alert.Direction.CALL else -move_pct
 
         a.status = Alert.Status.CLOSED
         a.exit_ts = exit_ts
         a.exit_reason = reason
-        a.net_pct = round(ret, 2)
         meta.update({"exit_price": round(exit_price, 2),
                      "move_pct": round(move_pct, 2),
-                     "return_pct": round(ret, 2),
-                     "win": ret > 0, "exit_reason": reason})
+                     "underlying_return_pct": round(und_ret, 2),
+                     "exit_reason": reason})
+
+        # P&L REAL de la OPCION: sale al bid del contrato en exit_ts. Aqui esta
+        # el apalancamiento (spike) que el subyacente no muestra.
+        fields = ["status", "exit_ts", "exit_reason", "net_pct", "meta",
+                  "updated_at"]
+        if a.occ_symbol and a.entry_ask:
+            exit_bid = _option_bid(provider, a.occ_symbol, exit_ts)
+            if exit_bid is not None:
+                entry_ask = float(a.entry_ask)
+                n = a.contracts or 1
+                opt_ret = (exit_bid - entry_ask) / entry_ask * 100
+                gross = (exit_bid - entry_ask) * 100 * n
+                net_d = gross - float(a.commission) * n
+                a.exit_premium = round(exit_bid, 4)
+                a.net_pct = round(opt_ret, 2)
+                a.net_dollars = round(net_d, 2)
+                meta.update({"exit_premium": round(exit_bid, 4),
+                             "option_return_pct": round(opt_ret, 2),
+                             "net_dollars": round(net_d, 2),
+                             "win": opt_ret > 0})
+                fields += ["exit_premium", "net_dollars"]
+            else:
+                # Sin bid de salida: no inventamos; caemos al % del subyacente.
+                a.net_pct = round(und_ret, 2)
+                meta.update({"win": und_ret > 0, "option_pnl": "sin_bid_salida"})
+        else:
+            a.net_pct = round(und_ret, 2)
+            meta.update({"win": und_ret > 0})
+
         a.meta = meta
-        a.save(update_fields=[
-            "status", "exit_ts", "exit_reason", "net_pct", "meta", "updated_at"])
+        a.save(update_fields=fields)
         closed.append(a)
     return closed
+
+
+def _option_bid(provider, occ, at):
+    """Bid del contrato en ``at`` (lo que cobrarias al vender). None si no hay."""
+    try:
+        q = provider.option_quote(occ, at=at)
+    except Exception:
+        return None
+    if q is None:
+        return None
+    bid = getattr(q, "bid", None)
+    return float(bid) if bid else None
