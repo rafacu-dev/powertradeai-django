@@ -189,6 +189,48 @@ def agent_view(request):
 
 @staff_member_required
 @require_POST
+def agent_train_launch(request):
+    """Lanza un dia de entrenamiento en un hilo de fondo (no bloquea el HTTP;
+    puede tardar minutos). Los resultados aparecen en el panel al refrescar."""
+    import threading
+    from datetime import datetime as _dt
+
+    from django.db import close_old_connections
+
+    from .agent.training import train_day
+    from .engine.session import is_trading_day
+
+    symbol = (request.POST.get("symbol") or "TSLA").upper()
+    date_str = request.POST.get("date", "")
+    try:
+        step = max(int(request.POST.get("step", "5")), 1)
+    except ValueError:
+        step = 5
+    try:
+        day = _dt.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return JsonResponse({"error": "Fecha invalida (YYYY-MM-DD)"}, status=400)
+    if not is_trading_day(day):
+        return JsonResponse({"error": f"{day} no es dia habil"}, status=400)
+
+    def _worker():
+        try:
+            train_day(symbol, day, step=step)
+        except Exception:
+            log.exception("entrenamiento en hilo fallo")
+        finally:
+            close_old_connections()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return JsonResponse({
+        "launched": True, "symbol": symbol, "date": str(day), "step": step,
+        "note": "Entrenamiento corriendo en segundo plano. Refresca en unos "
+                "minutos para ver los resultados.",
+    })
+
+
+@staff_member_required
+@require_POST
 def agent_launch(request):
     from .agent.runner import run_agent
 

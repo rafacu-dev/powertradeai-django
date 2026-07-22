@@ -165,6 +165,18 @@ header a:hover { color: var(--text); }
 
   <div class="card">
     <h2>Entrenamiento (tiempo pasado, causal)</h2>
+    <div class="launch" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+      <input type="text" id="train-symbol" value="TSLA" style="width:80px;text-transform:uppercase">
+      <input type="date" id="train-date">
+      <select id="train-step">
+        <option value="5" selected>5 min</option>
+        <option value="10">10 min</option>
+        <option value="15">15 min</option>
+        <option value="1">1 min (fino)</option>
+      </select>
+      <button class="btn" id="train-btn" onclick="launchTrain()">Entrenar este día</button>
+      <span class="launch-status" id="train-status"></span>
+    </div>
     {% if train.n %}
     <div class="track">
       <div class="tstat"><div class="tlabel">Operaciones</div><div class="tval">{{ train.n }}</div></div>
@@ -240,6 +252,32 @@ function getCookie(name) {
   const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
   return m ? m.pop() : '';
 }
+async function launchTrain() {
+  const btn = document.getElementById('train-btn');
+  const status = document.getElementById('train-status');
+  const date = document.getElementById('train-date').value;
+  if (!date) { status.textContent = 'Elige una fecha'; return; }
+  btn.disabled = true;
+  status.textContent = 'Lanzando...';
+  const body = new URLSearchParams({
+    symbol: document.getElementById('train-symbol').value,
+    date: date,
+    step: document.getElementById('train-step').value,
+  });
+  try {
+    const resp = await fetch("{% url 'powertradeai:agent_train_launch' %}", {
+      method: 'POST', body, headers: {'X-CSRFToken': getCookie('csrftoken')},
+    });
+    const d = await resp.json();
+    if (!resp.ok) throw new Error(d.error || 'error');
+    status.textContent = d.note;
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function launchAgent() {
   const btn = document.getElementById('launch-btn');
   const status = document.getElementById('launch-status');
