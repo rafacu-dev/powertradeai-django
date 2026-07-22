@@ -55,24 +55,28 @@ class AlertSerializer(serializers.ModelSerializer):
         }
 
     def get_venta(self, obj: Alert):
-        if obj.exit_premium is None:
+        # Las alertas del agente no tienen prima de opcion, pero si cierre
+        # (exit_ts) y motivo: no las trates como pendientes por falta de prima.
+        if obj.exit_ts is None:
             return {
                 "ts": PENDING, "prima": PENDING, "motivo": PENDING,
                 "cierre_previsto": obj.scheduled_exit_ts,
             }
         return {
             "ts": obj.exit_ts,
-            "prima": obj.exit_premium,
+            "prima": obj.exit_premium if obj.exit_premium is not None else PENDING,
             "motivo": obj.exit_reason,
             "cierre_previsto": obj.scheduled_exit_ts,
         }
 
     def get_resultado(self, obj: Alert):
-        if obj.net_dollars is None:
+        # Mientras no cierre, pendiente. Al cerrar, el % siempre esta
+        # (net_pct); el monto en dolares solo para las reglas de opciones.
+        if obj.status != Alert.Status.CLOSED:
             return {"monto": PENDING, "porciento": PENDING, "estado": obj.status}
         return {
-            "monto": obj.net_dollars,
-            "porciento": obj.net_pct,
+            "monto": obj.net_dollars if obj.net_dollars is not None else PENDING,
+            "porciento": obj.net_pct if obj.net_pct is not None else PENDING,
             "estado": obj.status,
         }
 

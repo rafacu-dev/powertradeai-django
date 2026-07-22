@@ -59,7 +59,10 @@ def train_day(symbol: str, day: date_cls, step: int = 5,
         n_steps += 1
         t += timedelta(minutes=step)
 
-    resolve_agent_alerts(now=stop, source=Alert.Source.AGENT_TRAIN)
+    # Cierre de sesion: liquidar TODA posicion abierta al precio de las 16:00,
+    # aunque su horizonte llegara mas alla del --end (si no, quedan colgadas).
+    close_ny = datetime.combine(day, time(16, 0), tzinfo=NY)
+    resolve_agent_alerts(now=close_ny, source=Alert.Source.AGENT_TRAIN, force=True)
 
     closed_all = Alert.objects.filter(
         source=Alert.Source.AGENT_TRAIN, symbol=sym,

@@ -67,12 +67,14 @@ def _walk_target_stop(direction, entry, seg, target_pct, stop_pct):
     return None
 
 
-def resolve_agent_alerts(now=None, source=None) -> list:
+def resolve_agent_alerts(now=None, source=None, force=False) -> list:
     """Cierra las alertas del agente por objetivo/stop (lo que ocurra primero)
     o, si no se tocan, al vencer el horizonte. Devuelve las cerradas.
 
     ``source`` acota a alertas en vivo (``agent``) o de entrenamiento
-    (``agent_train``); ``now`` es el reloj (el as_of en entrenamiento)."""
+    (``agent_train``); ``now`` es el reloj (el as_of en entrenamiento).
+    ``force``: liquida TODA posicion abierta al precio de ``now`` aunque su
+    horizonte no haya vencido (cierre de sesion)."""
     from django.utils import timezone
 
     from ..data import get_provider
@@ -120,13 +122,17 @@ def resolve_agent_alerts(now=None, source=None) -> list:
             a.direction, entry, seg, meta.get("target_pct"), meta.get("stop_pct"))
 
         if outcome is None:
-            # No se toco objetivo ni stop. Cerrar al horizonte si ya vencio.
-            if now < a.scheduled_exit_ts:
+            # No se toco objetivo ni stop.
+            if now < a.scheduled_exit_ts and not force:
                 continue  # sigue viva
-            exit_price = _price_at(provider, a.symbol, a.scheduled_exit_ts)
+            # Cerrar al horizonte, o al reloj actual si es un cierre forzado.
+            close_ts = min(a.scheduled_exit_ts, now)
+            exit_price = _price_at(provider, a.symbol, close_ts)
             if exit_price is None:
                 continue
-            reason, exit_ts = "horizonte", a.scheduled_exit_ts
+            reason = ("cierre_sesion"
+                      if force and now < a.scheduled_exit_ts else "horizonte")
+            exit_ts = close_ts
         else:
             reason, exit_price, exit_ts = outcome
 
