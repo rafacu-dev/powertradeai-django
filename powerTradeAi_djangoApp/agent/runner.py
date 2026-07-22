@@ -113,8 +113,11 @@ def _execute_loop(ctx, messages: list[dict], transcript: list[dict]) -> str:
 
 
 def run_agent(goal: str, symbols: list[str] | None = None,
-              trigger: str = "manual"):
-    """Corre el agente una vez. Devuelve el ``AgentRun`` con todo registrado."""
+              trigger: str = "manual", as_of=None):
+    """Corre el agente una vez. Devuelve el ``AgentRun`` con todo registrado.
+
+    ``as_of`` (opcional): reloj causal para entrenamiento en tiempo pasado.
+    Las skills solo veran datos hasta ese instante."""
     from ..models import AgentRun
 
     symbols = symbols or []
@@ -122,7 +125,7 @@ def run_agent(goal: str, symbols: list[str] | None = None,
         trigger=trigger, status=AgentRun.Status.RUNNING,
         model_name=llm.model_name(), symbols=symbols, goal=goal,
     )
-    ctx = {"run": run}
+    ctx = {"run": run, "as_of": as_of}
     transcript: list[dict] = []
     user = goal
     if symbols:

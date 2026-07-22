@@ -164,6 +164,21 @@ header a:hover { color: var(--text); }
   </div>
 
   <div class="card">
+    <h2>Entrenamiento (tiempo pasado, causal)</h2>
+    {% if train.n %}
+    <div class="track">
+      <div class="tstat"><div class="tlabel">Operaciones</div><div class="tval">{{ train.n }}</div></div>
+      <div class="tstat"><div class="tlabel">Win rate</div><div class="tval">{% if train.win_rate != None %}{{ train.win_rate }}%{% else %}—{% endif %}</div></div>
+      <div class="tstat"><div class="tlabel">Retorno medio</div><div class="tval {% if train.avg_pct > 0 %}pos{% elif train.avg_pct < 0 %}neg{% endif %}">{% if train.avg_pct != None %}{{ train.avg_pct }}%{% else %}—{% endif %}</div></div>
+      <div class="tstat"><div class="tlabel">Ganadoras</div><div class="tval pos">{{ train.wins }}</div></div>
+    </div>
+    {% if train_days %}<div class="note">Días entrenados: {% for d in train_days %}{{ d|date:"d M" }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>{% endif %}
+    {% else %}
+    <div class="empty">Sin entrenamientos aún. Corre <code>python manage.py train_agent --symbol TSLA --date YYYY-MM-DD --step 5</code>.</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
     <h2>Visión por activo (continuidad)</h2>
     {% if analyses %}
     <div class="analyses">

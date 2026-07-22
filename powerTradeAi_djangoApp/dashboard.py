@@ -163,11 +163,27 @@ def agent_view(request):
     }
     recent_alerts = agent_alerts.select_related("strategy").order_by("-signal_ts")[:15]
 
+    # Entrenamiento (agent_train): separado del expediente en vivo.
+    train_qs = Alert.objects.filter(source="agent_train", status=Alert.Status.CLOSED)
+    tagg = train_qs.aggregate(n=Count("id"), wins=Count("id", filter=Q(net_pct__gt=0)),
+                              avg_pct=Avg("net_pct"))
+    tn = tagg["n"] or 0
+    train = {
+        "n": tn, "wins": tagg["wins"] or 0,
+        "win_rate": round((tagg["wins"] or 0) / tn * 100, 1) if tn else None,
+        "avg_pct": round(tagg["avg_pct"], 2) if tagg["avg_pct"] is not None else None,
+    }
+    train_days = list(
+        Alert.objects.filter(source="agent_train")
+        .values_list("session_date", flat=True).distinct().order_by("-session_date")[:10])
+
     return render(request, "powertradeai/agent.html", {
         "runs": runs,
         "analyses": analyses,
         "track": track,
         "recent_alerts": recent_alerts,
+        "train": train,
+        "train_days": train_days,
     })
 
 

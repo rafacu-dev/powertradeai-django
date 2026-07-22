@@ -55,6 +55,68 @@ def _provider():
     return get_provider()
 
 
+# ── Reloj causal (entrenamiento en tiempo pasado) ───────────────────
+# Cuando ctx trae ``as_of`` estamos en entrenamiento: NINGUNA skill puede ver
+# datos posteriores a ese instante. ``_now``/``_spot``/``_bars_upto`` acotan
+# todo a ese reloj; en vivo (``as_of`` None) se comportan como siempre.
+
+def _now(ctx):
+    from django.utils import timezone
+    return ctx.get("as_of") or timezone.now()
+
+
+def _is_training(ctx) -> bool:
+    return ctx.get("as_of") is not None
+
+
+def _alert_source(ctx):
+    from ..models import Alert
+    return Alert.Source.AGENT_TRAIN if _is_training(ctx) else Alert.Source.AGENT
+
+
+def _price_asof(provider, symbol, as_of):
+    """Ultimo precio conocido en/antes de ``as_of`` (cierre de la vela de 1m).
+    Antes de la apertura, el ultimo cierre diario previo. None si no hay dato."""
+    from datetime import timedelta
+    day = as_of.astimezone(NY).date()
+    try:
+        bars = provider.bars(symbol, day, day, "1m")
+    except Exception:
+        bars = None
+    if bars is not None and not bars.empty:
+        upto = bars[bars.index <= as_of]
+        if not upto.empty:
+            return float(upto.iloc[-1]["close"])
+    try:
+        d = provider.bars(symbol, day - timedelta(days=7), day, "1d")
+        prev = d[d.index.tz_convert(NY).date < day]
+        if not prev.empty:
+            return float(prev["close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def _spot(ctx, provider, symbol):
+    as_of = ctx.get("as_of")
+    if as_of is None:
+        return float(provider.latest_price(symbol))
+    px = _price_asof(provider, symbol, as_of)
+    if px is None:
+        from ..data import MarketDataError
+        raise MarketDataError(f"sin precio as-of para {symbol}")
+    return px
+
+
+def _bars_upto(ctx, provider, symbol, start, end, tf):
+    """Velas hasta ``end``, truncadas al reloj causal si estamos entrenando."""
+    df = provider.bars(symbol, start, end, tf)
+    as_of = ctx.get("as_of")
+    if as_of is not None and not df.empty:
+        df = df[df.index <= as_of]
+    return df
+
+
 def _bollinger_and_mas(closes, period=20, k=2):
     import pandas as pd  # noqa: F401
     n = len(closes)
@@ -95,11 +157,12 @@ def _bollinger_and_mas(closes, period=20, k=2):
 def get_market_data(ctx, symbol: str, timeframe: str = "15m",
                     lookback_days: int = 15):
     provider = _provider()
-    end = datetime.now(NY).date()
+    sym = symbol.upper()
+    end = _now(ctx).date()
     start = end - timedelta(days=min(int(lookback_days), 60))
-    bars = provider.bars(symbol.upper(), start, end, timeframe)
+    bars = _bars_upto(ctx, provider, sym, start, end, timeframe)
     if bars.empty:
-        return {"symbol": symbol.upper(), "error": "sin datos"}
+        return {"symbol": sym, "error": "sin datos"}
     closes = bars["close"]
     last = bars.iloc[-1]
     tail = [
@@ -111,14 +174,14 @@ def get_market_data(ctx, symbol: str, timeframe: str = "15m",
         for ts, r in bars.tail(8).iterrows()
     ]
     result = {
-        "symbol": symbol.upper(),
+        "symbol": sym,
         "timeframe": timeframe,
         "last_close": round(float(last["close"]), 2),
         "recent_bars": tail,
     }
     result.update(_bollinger_and_mas(closes))
     try:
-        result["last_price"] = round(float(provider.latest_price(symbol.upper())), 2)
+        result["last_price"] = round(_spot(ctx, provider, sym), 2)
     except Exception:
         pass
     return result
@@ -142,13 +205,13 @@ def get_market_data(ctx, symbol: str, timeframe: str = "15m",
 )
 def scan_bollinger(ctx, symbols: list[str]):
     provider = _provider()
-    end = datetime.now(NY).date()
+    end = _now(ctx).date()
     rows = []
     for symbol in symbols:
         sym = symbol.upper()
         try:
-            bars = provider.bars(sym, end - timedelta(days=15), end, "15m")
-            h1 = provider.bars(sym, end - timedelta(days=40), end, "1h")
+            bars = _bars_upto(ctx, provider, sym, end - timedelta(days=15), end, "15m")
+            h1 = _bars_upto(ctx, provider, sym, end - timedelta(days=40), end, "1h")
         except Exception as exc:
             rows.append({"symbol": sym, "error": str(exc)})
             continue
@@ -158,7 +221,7 @@ def scan_bollinger(ctx, symbols: list[str]):
         closes = bars["close"]
         bb = _bollinger_and_mas(closes).get("bollinger")
         try:
-            price = float(provider.latest_price(sym))
+            price = _spot(ctx, provider, sym)
         except Exception:
             price = float(closes.iloc[-1])
         status = "dentro"
@@ -198,18 +261,19 @@ def get_option_quote(ctx, symbol: str, right: str, dte: int = 0):
     provider = _provider()
     sym = symbol.upper()
     try:
-        spot = float(provider.latest_price(sym))
+        spot = _spot(ctx, provider, sym)
     except Exception as exc:
         return {"error": f"sin precio del subyacente: {exc}"}
     strike = round(spot)
-    today = datetime.now(NY).date()
+    today = _now(ctx).date()
     exps = candidate_expirations(today, max_dte=max(int(dte) + 5, 7))
     if not exps:
         return {"error": "sin expiraciones candidatas"}
     target = min(exps, key=lambda e: abs((e - today).days - int(dte)))
     occ = occ_symbol(sym, target, right, strike)
+    at = ctx.get("as_of")  # quote historica al instante si entrenamos
     try:
-        q = provider.option_quote(occ)
+        q = provider.option_quote(occ, at=at) if at else provider.option_quote(occ)
     except Exception as exc:
         return {"error": f"sin quote: {exc}", "occ": occ}
     if q is None:
@@ -305,16 +369,16 @@ def create_alert(ctx, symbol: str, direction: str, thesis: str,
                  horizon_minutes: int = 120,
                  target_pct: float | None = None,
                  stop_pct: float | None = None):
-    from django.utils import timezone
-
     from ..models import Alert, Strategy
     sym = symbol.upper()
     provider = _provider()
     try:
-        spot = float(provider.latest_price(sym))
+        spot = _spot(ctx, provider, sym)
     except Exception:
         spot = None
 
+    training = _is_training(ctx)
+    source = _alert_source(ctx)
     strategy, _ = Strategy.objects.get_or_create(
         strategy_id=f"AGENT:{sym}",
         defaults={
@@ -322,31 +386,33 @@ def create_alert(ctx, symbol: str, direction: str, thesis: str,
             "rule_version": "agent_v1", "enabled": False,
         },
     )
-    now = timezone.now()
+    now = _now(ctx)
     today = now.astimezone(NY).date()
     horizon = max(int(horizon_minutes or 120), 5)
-    # El horizonte se acota al cierre de la sesion (16:00 NY).
     close_dt = datetime.combine(today, datetime(2000, 1, 1, 16, 0).time(),
                                 tzinfo=NY)
     exit_at = min(now + timedelta(minutes=horizon), close_dt)
-
-    alert, created = Alert.objects.update_or_create(
-        strategy=strategy, session_date=today,
-        direction=direction, source=Alert.Source.AGENT,
-        defaults={
-            "rule_version": "agent_v1", "symbol": sym,
-            "status": Alert.Status.PENDING, "signal_ts": now,
-            "detected_at": now, "entry_ts": now,
-            "scheduled_exit_ts": exit_at, "agent_run": ctx["run"],
-            "underlying_at_signal": spot,
-            "meta": {"thesis": thesis, "by": "agent",
-                     "entry_price": spot, "horizon_minutes": horizon,
-                     "target_pct": (round(float(target_pct), 3)
-                                    if target_pct else None),
-                     "stop_pct": (round(abs(float(stop_pct)), 3)
-                                  if stop_pct else None)},
-        },
-    )
+    meta = {"thesis": thesis, "by": "agent", "entry_price": spot,
+            "horizon_minutes": horizon,
+            "target_pct": round(float(target_pct), 3) if target_pct else None,
+            "stop_pct": round(abs(float(stop_pct)), 3) if stop_pct else None,
+            "training": training}
+    common = {
+        "rule_version": "agent_v1", "symbol": sym,
+        "status": Alert.Status.PENDING, "signal_ts": now,
+        "detected_at": now, "entry_ts": now, "scheduled_exit_ts": exit_at,
+        "agent_run": ctx["run"], "underlying_at_signal": spot, "meta": meta,
+    }
+    if training:
+        # En entrenamiento el agente puede tomar varias operaciones por dia.
+        alert = Alert.objects.create(
+            strategy=strategy, session_date=today, direction=direction,
+            source=source, **common)
+        created = True
+    else:
+        alert, created = Alert.objects.update_or_create(
+            strategy=strategy, session_date=today, direction=direction,
+            source=source, defaults=common)
     return {"alert_id": alert.id, "created": created, "symbol": sym,
             "direction": direction, "entry_price": spot,
             "target_pct": target_pct, "stop_pct": stop_pct,
@@ -382,30 +448,32 @@ def get_intraday_stats(ctx, symbol: str):
     import pandas as pd  # noqa: F401
     provider = _provider()
     sym = symbol.upper()
-    end = datetime.now(NY).date()
+    end = _now(ctx).date()
 
     daily = provider.bars(sym, end - timedelta(days=40), end, "1d")
     if daily.empty:
         return {"symbol": sym, "error": "sin datos diarios"}
     ddates = daily.index.tz_convert(NY).date
-    today_daily = daily[ddates == end]
+    # La vela diaria de HOY resume toda la jornada (incluye el futuro): para el
+    # ATR y el cierre previo solo se usan dias ya cerrados (< hoy).
     prev = daily[ddates < end]
     prev_close = float(prev["close"].iloc[-1]) if not prev.empty else None
 
-    # ATR(14) diario.
+    # ATR(14) diario, sobre dias cerrados.
     atr = None
-    if len(daily) >= 15:
-        h, l, c = daily["high"], daily["low"], daily["close"]
+    if len(prev) >= 15:
+        h, l, c = prev["high"], prev["low"], prev["close"]
         pc = c.shift(1)
         tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
         atr = round(float(tr.rolling(14).mean().iloc[-1]), 2)
 
-    bars15 = provider.bars(sym, end - timedelta(days=5), end, "15m")
-    ny = bars15.index.tz_convert(NY)
-    today15 = bars15[(ny.date == end) &
-                     (ny.time >= datetime(2000, 1, 1, 9, 30).time())]
+    bars15 = _bars_upto(ctx, provider, sym, end - timedelta(days=5), end, "15m")
+    ny = bars15.index.tz_convert(NY) if not bars15.empty else None
+    today15 = (bars15[(ny.date == end) &
+                      (ny.time >= datetime(2000, 1, 1, 9, 30).time())]
+               if ny is not None else bars15)
     try:
-        price = float(provider.latest_price(sym))
+        price = _spot(ctx, provider, sym)
     except Exception:
         price = float(bars15["close"].iloc[-1]) if not bars15.empty else None
 
@@ -450,10 +518,14 @@ def get_intraday_stats(ctx, symbol: str):
 def get_historical_bars(ctx, symbol: str, days: int = 20):
     provider = _provider()
     sym = symbol.upper()
-    end = datetime.now(NY).date()
+    end = _now(ctx).date()
     daily = provider.bars(sym, end - timedelta(days=min(int(days), 90) + 5), end, "1d")
     if daily.empty:
         return {"symbol": sym, "error": "sin datos"}
+    # Solo dias ya cerrados: la vela de hoy incluiria el futuro.
+    daily = daily[daily.index.tz_convert(NY).date < end]
+    if daily.empty:
+        return {"symbol": sym, "error": "sin dias previos"}
     rows, prev_c = [], None
     for ts, r in daily.tail(min(int(days), 90)).iterrows():
         o, h, l, c = (float(r["open"]), float(r["high"]),
@@ -488,8 +560,9 @@ def get_historical_bars(ctx, symbol: str, days: int = 20):
 def backtest_reversion(ctx, symbol: str, days: int = 15, max_hold_bars: int = 8):
     provider = _provider()
     sym = symbol.upper()
-    end = datetime.now(NY).date()
-    bars = provider.bars(sym, end - timedelta(days=min(int(days), 30) + 5), end, "15m")
+    end = _now(ctx).date()
+    bars = _bars_upto(ctx, provider, sym,
+                      end - timedelta(days=min(int(days), 30) + 5), end, "15m")
     ny = bars.index.tz_convert(NY)
     rth = bars[(ny.time >= datetime(2000, 1, 1, 9, 30).time()) &
                (ny.time < datetime(2000, 1, 1, 16, 0).time())]
@@ -569,20 +642,18 @@ def save_note(ctx, topic: str, note: str):
     },
 )
 def get_open_positions(ctx, symbol: str | None = None):
-    from django.utils import timezone
-
     from ..models import Alert
     provider = _provider()
-    qs = Alert.objects.filter(source=Alert.Source.AGENT,
+    qs = Alert.objects.filter(source=_alert_source(ctx),
                               status=Alert.Status.PENDING)
     if symbol:
         qs = qs.filter(symbol=symbol.upper())
     out = []
-    now = timezone.now()
+    now = _now(ctx)
     for a in qs:
         entry = float(a.underlying_at_signal or (a.meta or {}).get("entry_price") or 0)
         try:
-            price = float(provider.latest_price(a.symbol))
+            price = _spot(ctx, provider, a.symbol)
         except Exception:
             price = None
         unreal = None
@@ -621,11 +692,9 @@ def get_open_positions(ctx, symbol: str | None = None):
 def adjust_position(ctx, alert_id: int, target_pct: float | None = None,
                     stop_pct: float | None = None,
                     horizon_minutes: int | None = None):
-    from django.utils import timezone
-
     from ..models import Alert
     try:
-        a = Alert.objects.get(id=alert_id, source=Alert.Source.AGENT,
+        a = Alert.objects.get(id=alert_id, source=_alert_source(ctx),
                               status=Alert.Status.PENDING)
     except Alert.DoesNotExist:
         return {"error": "posicion no encontrada o ya cerrada"}
@@ -639,15 +708,16 @@ def adjust_position(ctx, alert_id: int, target_pct: float | None = None,
         changed["stop_pct"] = meta["stop_pct"]
     fields = ["meta", "updated_at"]
     if horizon_minutes is not None:
+        now = _now(ctx)
         close_dt = datetime.combine(
-            timezone.now().astimezone(NY).date(),
+            now.astimezone(NY).date(),
             datetime(2000, 1, 1, 16, 0).time(), tzinfo=NY)
         a.scheduled_exit_ts = min(
-            timezone.now() + timedelta(minutes=int(horizon_minutes)), close_dt)
+            now + timedelta(minutes=int(horizon_minutes)), close_dt)
         changed["resolves_at"] = a.scheduled_exit_ts.astimezone(NY).strftime("%H:%M")
         fields.append("scheduled_exit_ts")
     meta.setdefault("adjustments", []).append(
-        {"at": timezone.now().astimezone(NY).strftime("%H:%M"), **changed})
+        {"at": _now(ctx).astimezone(NY).strftime("%H:%M"), **changed})
     a.meta = meta
     a.save(update_fields=fields)
     return {"alert_id": alert_id, "changed": changed}
@@ -667,18 +737,16 @@ def adjust_position(ctx, alert_id: int, target_pct: float | None = None,
     },
 )
 def close_position(ctx, alert_id: int, reason: str):
-    from django.utils import timezone
-
     from ..models import Alert
     provider = _provider()
     try:
-        a = Alert.objects.get(id=alert_id, source=Alert.Source.AGENT,
+        a = Alert.objects.get(id=alert_id, source=_alert_source(ctx),
                               status=Alert.Status.PENDING)
     except Alert.DoesNotExist:
         return {"error": "posicion no encontrada o ya cerrada"}
     entry = float(a.underlying_at_signal or (a.meta or {}).get("entry_price") or 0)
     try:
-        price = float(provider.latest_price(a.symbol))
+        price = _spot(ctx, provider, a.symbol)
     except Exception:
         return {"error": "sin precio actual para cerrar"}
     if not entry:
@@ -686,7 +754,7 @@ def close_position(ctx, alert_id: int, reason: str):
     move = (price - entry) / entry * 100
     ret = move if a.direction == "CALL" else -move
     a.status = Alert.Status.CLOSED
-    a.exit_ts = timezone.now()
+    a.exit_ts = _now(ctx)
     a.exit_reason = f"agente: {reason}"[:40]
     a.net_pct = round(ret, 2)
     meta = dict(a.meta or {})
@@ -713,7 +781,7 @@ def close_position(ctx, alert_id: int, reason: str):
 )
 def get_my_track_record(ctx, symbol: str | None = None):
     from ..models import Alert
-    qs = Alert.objects.filter(source=Alert.Source.AGENT,
+    qs = Alert.objects.filter(source=_alert_source(ctx),
                               status=Alert.Status.CLOSED)
     if symbol:
         qs = qs.filter(symbol=symbol.upper())
@@ -770,7 +838,7 @@ def set_price_trigger(ctx, symbol: str, price: float, reason: str,
     provider = _provider()
     sym = symbol.upper()
     try:
-        ref = float(provider.latest_price(sym))
+        ref = _spot(ctx, provider, sym)
     except Exception:
         ref = None
     if direction not in ("above", "below"):

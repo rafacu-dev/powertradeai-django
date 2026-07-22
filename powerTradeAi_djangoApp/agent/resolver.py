@@ -67,17 +67,21 @@ def _walk_target_stop(direction, entry, seg, target_pct, stop_pct):
     return None
 
 
-def resolve_agent_alerts(now=None) -> list:
+def resolve_agent_alerts(now=None, source=None) -> list:
     """Cierra las alertas del agente por objetivo/stop (lo que ocurra primero)
-    o, si no se tocan, al vencer el horizonte. Devuelve las cerradas."""
+    o, si no se tocan, al vencer el horizonte. Devuelve las cerradas.
+
+    ``source`` acota a alertas en vivo (``agent``) o de entrenamiento
+    (``agent_train``); ``now`` es el reloj (el as_of en entrenamiento)."""
     from django.utils import timezone
 
     from ..data import get_provider
     from ..models import Alert
 
     now = now or timezone.now()
+    source = source or Alert.Source.AGENT
     pending = list(Alert.objects.filter(
-        source=Alert.Source.AGENT, status=Alert.Status.PENDING,
+        source=source, status=Alert.Status.PENDING,
         entry_ts__isnull=False, scheduled_exit_ts__isnull=False,
     ))
     if not pending:

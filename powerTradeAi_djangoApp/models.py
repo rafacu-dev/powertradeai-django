@@ -64,6 +64,7 @@ class Alert(models.Model):
         LIVE = "live", "En vivo"
         REPLAY = "replay", "Reconstruida"
         AGENT = "agent", "Agente"
+        AGENT_TRAIN = "agent_train", "Agente (entrenamiento)"
 
     strategy = models.ForeignKey(
         Strategy, on_delete=models.PROTECT, related_name="alerts")
@@ -83,7 +84,7 @@ class Alert(models.Model):
     # instante teorico, no la que se habria pagado. Mezclar las dos en un
     # agregado produce un P&L que no significa nada.
     source = models.CharField(
-        max_length=8, choices=Source.choices,
+        max_length=16, choices=Source.choices,
         default=Source.LIVE, db_index=True)
 
     signal_ts = models.DateTimeField(help_text="Cierre de la vela que disparo.")
@@ -150,9 +151,12 @@ class Alert(models.Model):
             # Sin esto, un reinicio del worker duplica la alerta del dia.
             # ``source`` entra en la clave para que reconstruir una sesion que
             # ya se opero en vivo no choque contra la alerta real ni la pise.
+            # Solo aplica a reglas (live/replay): el agente y su entrenamiento
+            # pueden tomar varias operaciones por dia.
             models.UniqueConstraint(
                 fields=["strategy", "session_date", "direction", "source"],
                 name="uniq_alert_per_strategy_session_direction_source",
+                condition=models.Q(source__in=["live", "replay"]),
             ),
         ]
 
@@ -287,6 +291,7 @@ class AgentRun(models.Model):
     class Trigger(models.TextChoices):
         SCAN_LOOP = "scan_loop", "Scan loop"
         MANUAL = "manual", "Manual"
+        TRAINING = "training", "Entrenamiento"
 
     trigger = models.CharField(
         max_length=16, choices=Trigger.choices, default=Trigger.MANUAL)
