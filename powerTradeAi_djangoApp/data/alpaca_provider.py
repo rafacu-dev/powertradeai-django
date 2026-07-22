@@ -122,18 +122,38 @@ class AlpacaProvider:
         return out[~out.index.duplicated(keep="first")].sort_index()
 
     def latest_price(self, symbol: str) -> float:
-        from alpaca.data.requests import StockLatestQuoteRequest
+        """Ultimo precio operado. Se usa el ULTIMO TRADE, no el mid del bid/ask:
+        en premarket el feed IEX tiene liquidez pesima y el ask puede ser una
+        orden fantasma (p.ej. NVDA bid 204 / ask 230 -> mid 217 irreal). El
+        precio del ultimo trade coincide con lo que ve el operador."""
+        from alpaca.data.requests import (
+            StockLatestQuoteRequest, StockLatestTradeRequest,
+        )
 
         stock, _ = self._clients()
+        sym = symbol.upper()
         try:
-            data = stock.get_stock_latest_quote(StockLatestQuoteRequest(
-                symbol_or_symbols=symbol.upper(), feed=self._feed))
+            data = stock.get_stock_latest_trade(StockLatestTradeRequest(
+                symbol_or_symbols=sym, feed=self._feed))
+            price = float(data[sym].price or 0)
+            if price > 0:
+                return price
+        except Exception:
+            pass
+
+        # Sin trade util: caer al mid del quote, pero solo si el spread es
+        # razonable (< 5%). Un spread absurdo delata un lado fantasma.
+        try:
+            q = stock.get_stock_latest_quote(StockLatestQuoteRequest(
+                symbol_or_symbols=sym, feed=self._feed))[sym]
         except Exception as exc:
-            raise MarketDataError(f"Alpaca: sin quote de {symbol}: {exc}") from exc
-        quote = data[symbol.upper()]
-        bid, ask = float(quote.bid_price or 0), float(quote.ask_price or 0)
+            raise MarketDataError(f"Alpaca: sin precio de {symbol}: {exc}") from exc
+        bid, ask = float(q.bid_price or 0), float(q.ask_price or 0)
         if bid <= 0 or ask <= 0:
             raise MarketDataError(f"Alpaca: quote no utilizable para {symbol}")
+        if ask > bid * 1.05:
+            raise MarketDataError(
+                f"Alpaca: spread irreal para {symbol} (bid {bid}, ask {ask})")
         return (bid + ask) / 2
 
     def trades(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
