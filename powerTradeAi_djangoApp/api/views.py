@@ -13,8 +13,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..auth import ApiKeyAuthentication
-from ..models import Alert, ScanRun, Strategy
+from ..models import (
+    AgentAnalysis, AgentNote, AgentRun, AgentTrigger, Alert, ScanRun, Strategy,
+)
 from .serializers import (
+    AgentAnalysisSerializer,
+    AgentNoteSerializer,
+    AgentRunListSerializer,
+    AgentRunSerializer,
+    AgentTriggerSerializer,
     AlertSerializer,
     ScanRunSerializer,
     StrategyPerformanceSerializer,
@@ -139,6 +146,89 @@ class ScanRunViewSet(ApiKeyViewSet):
 
     serializer_class = ScanRunSerializer
     queryset = ScanRun.objects.all()[:200]
+
+
+# ── Auditoria del agente (solo lectura, via API key) ────────────────
+
+class AgentRunViewSet(ApiKeyViewSet):
+    """Corridas del agente. El listado es ligero; el DETALLE trae el
+    transcript completo (razonamiento + cada skill con args y resultado).
+
+    GET /api/powertradeai/agent-runs/?symbol=TSLA&status=done&desde=2026-07-01
+    GET /api/powertradeai/agent-runs/<id>/
+    """
+
+    def get_serializer_class(self):
+        return (AgentRunSerializer if self.action == "retrieve"
+                else AgentRunListSerializer)
+
+    def get_queryset(self):
+        qs = AgentRun.objects.all()
+        p = self.request.query_params
+        if (status := p.get("status")):
+            qs = qs.filter(status=status)
+        if (trigger := p.get("trigger")):
+            qs = qs.filter(trigger=trigger)
+        if (symbol := p.get("symbol")):
+            # Portable en SQLite y Postgres: la pertenencia al JSON se evalua
+            # en Python y luego se filtra por id (mantiene el queryset).
+            sym = symbol.upper()
+            ids = [r.id for r in qs.only("id", "symbols")
+                   if sym in (r.symbols or [])]
+            qs = qs.filter(id__in=ids)
+        if (desde := p.get("desde")):
+            qs = qs.filter(started_at__date__gte=desde)
+        if (hasta := p.get("hasta")):
+            qs = qs.filter(started_at__date__lte=hasta)
+        return qs
+
+
+class AgentAnalysisViewSet(ApiKeyViewSet):
+    """Analisis del agente por activo (append-only).
+
+    GET /api/powertradeai/agent-analyses/?symbol=TSLA
+    """
+
+    serializer_class = AgentAnalysisSerializer
+
+    def get_queryset(self):
+        qs = AgentAnalysis.objects.all()
+        if (symbol := self.request.query_params.get("symbol")):
+            qs = qs.filter(symbol=symbol.upper())
+        return qs
+
+
+class AgentNoteViewSet(ApiKeyViewSet):
+    """Cuaderno de notas del agente.
+
+    GET /api/powertradeai/agent-notes/?topic=TSLA
+    """
+
+    serializer_class = AgentNoteSerializer
+
+    def get_queryset(self):
+        qs = AgentNote.objects.all()
+        if (topic := self.request.query_params.get("topic")):
+            qs = qs.filter(topic=topic)
+        return qs
+
+
+class AgentTriggerViewSet(ApiKeyViewSet):
+    """Niveles de vigilancia que fijo el agente.
+
+    GET /api/powertradeai/agent-triggers/?symbol=TSLA&active=true
+    """
+
+    serializer_class = AgentTriggerSerializer
+
+    def get_queryset(self):
+        qs = AgentTrigger.objects.all()
+        p = self.request.query_params
+        if (symbol := p.get("symbol")):
+            qs = qs.filter(symbol=symbol.upper())
+        if (active := p.get("active")):
+            qs = qs.filter(active=active.lower() in ("1", "true", "yes"))
+        return qs
 
 
 class ReplayView(APIView):

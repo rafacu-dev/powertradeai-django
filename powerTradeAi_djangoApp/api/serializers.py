@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from ..models import Alert, ScanRun, Strategy
+from ..models import (
+    AgentAnalysis, AgentNote, AgentRun, AgentTrigger, Alert, ScanRun, Strategy,
+)
 
 PENDING = "pending"
 
@@ -103,4 +105,65 @@ class ScanRunSerializer(serializers.ModelSerializer):
         fields = [
             "id", "started_at", "finished_at", "strategies_evaluated",
             "alerts_created", "alerts_closed", "ok", "error",
+        ]
+
+
+# ── Auditoria del agente ────────────────────────────────────────────
+
+class AgentRunListSerializer(serializers.ModelSerializer):
+    """Listado ligero: sin el transcript completo (se ve en el detalle)."""
+
+    steps = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AgentRun
+        fields = [
+            "id", "trigger", "status", "model_name", "symbols", "goal",
+            "summary", "alerts_created", "steps", "error",
+            "started_at", "finished_at",
+        ]
+
+    def get_steps(self, obj: AgentRun) -> int:
+        return len(obj.transcript or [])
+
+
+class AgentRunSerializer(serializers.ModelSerializer):
+    """Detalle: incluye el transcript completo (todo el razonamiento y cada
+    skill con sus argumentos y resultado)."""
+
+    class Meta:
+        model = AgentRun
+        fields = [
+            "id", "trigger", "status", "model_name", "symbols", "goal",
+            "summary", "transcript", "alerts_created", "error",
+            "started_at", "finished_at",
+        ]
+
+
+class AgentAnalysisSerializer(serializers.ModelSerializer):
+    agent_run_id = serializers.IntegerField(source="agent_run.id", read_only=True)
+
+    class Meta:
+        model = AgentAnalysis
+        fields = ["id", "symbol", "stance", "analysis", "agent_run_id", "created_at"]
+
+
+class AgentNoteSerializer(serializers.ModelSerializer):
+    agent_run_id = serializers.IntegerField(
+        source="agent_run.id", read_only=True, allow_null=True)
+
+    class Meta:
+        model = AgentNote
+        fields = ["id", "topic", "note", "agent_run_id", "created_at"]
+
+
+class AgentTriggerSerializer(serializers.ModelSerializer):
+    agent_run_id = serializers.IntegerField(
+        source="agent_run.id", read_only=True, allow_null=True)
+
+    class Meta:
+        model = AgentTrigger
+        fields = [
+            "id", "symbol", "price", "direction", "reason", "ref_price",
+            "active", "agent_run_id", "created_at", "triggered_at",
         ]
