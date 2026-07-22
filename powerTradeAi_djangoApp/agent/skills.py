@@ -559,6 +559,147 @@ def save_note(ctx, topic: str, note: str):
 
 
 @skill(
+    "get_open_positions",
+    "Tus posiciones ABIERTAS (alertas aun sin cerrar): entrada, precio actual, "
+    "ganancia/perdida no realizada, tu objetivo y stop vigentes y el tiempo en "
+    "el trade. Revisalas para gestionarlas. Opcional filtrar por activo.",
+    {
+        "type": "object",
+        "properties": {"symbol": {"type": "string", "description": "Opcional."}},
+    },
+)
+def get_open_positions(ctx, symbol: str | None = None):
+    from django.utils import timezone
+
+    from ..models import Alert
+    provider = _provider()
+    qs = Alert.objects.filter(source=Alert.Source.AGENT,
+                              status=Alert.Status.PENDING)
+    if symbol:
+        qs = qs.filter(symbol=symbol.upper())
+    out = []
+    now = timezone.now()
+    for a in qs:
+        entry = float(a.underlying_at_signal or (a.meta or {}).get("entry_price") or 0)
+        try:
+            price = float(provider.latest_price(a.symbol))
+        except Exception:
+            price = None
+        unreal = None
+        if entry and price:
+            move = (price - entry) / entry * 100
+            unreal = round(move if a.direction == "CALL" else -move, 2)
+        mins = int((now - a.entry_ts).total_seconds() / 60) if a.entry_ts else None
+        meta = a.meta or {}
+        out.append({
+            "alert_id": a.id, "symbol": a.symbol, "direction": a.direction,
+            "entry": round(entry, 2) if entry else None,
+            "price": round(price, 2) if price else None,
+            "unrealized_pct": unreal, "target_pct": meta.get("target_pct"),
+            "stop_pct": meta.get("stop_pct"), "minutes_open": mins,
+            "thesis": meta.get("thesis", ""),
+        })
+    return {"open": out}
+
+
+@skill(
+    "adjust_position",
+    "Ajusta el plan de una posicion ABIERTA sin cerrarla: nuevo objetivo, nuevo "
+    "stop (p.ej. moverlo a break-even tras ir a favor) o nuevo horizonte. Solo "
+    "los campos que pases cambian.",
+    {
+        "type": "object",
+        "properties": {
+            "alert_id": {"type": "integer"},
+            "target_pct": {"type": "number"},
+            "stop_pct": {"type": "number"},
+            "horizon_minutes": {"type": "integer"},
+        },
+        "required": ["alert_id"],
+    },
+)
+def adjust_position(ctx, alert_id: int, target_pct: float | None = None,
+                    stop_pct: float | None = None,
+                    horizon_minutes: int | None = None):
+    from django.utils import timezone
+
+    from ..models import Alert
+    try:
+        a = Alert.objects.get(id=alert_id, source=Alert.Source.AGENT,
+                              status=Alert.Status.PENDING)
+    except Alert.DoesNotExist:
+        return {"error": "posicion no encontrada o ya cerrada"}
+    meta = dict(a.meta or {})
+    changed = {}
+    if target_pct is not None:
+        meta["target_pct"] = round(float(target_pct), 3)
+        changed["target_pct"] = meta["target_pct"]
+    if stop_pct is not None:
+        meta["stop_pct"] = round(abs(float(stop_pct)), 3)
+        changed["stop_pct"] = meta["stop_pct"]
+    fields = ["meta", "updated_at"]
+    if horizon_minutes is not None:
+        close_dt = datetime.combine(
+            timezone.now().astimezone(NY).date(),
+            datetime(2000, 1, 1, 16, 0).time(), tzinfo=NY)
+        a.scheduled_exit_ts = min(
+            timezone.now() + timedelta(minutes=int(horizon_minutes)), close_dt)
+        changed["resolves_at"] = a.scheduled_exit_ts.astimezone(NY).strftime("%H:%M")
+        fields.append("scheduled_exit_ts")
+    meta.setdefault("adjustments", []).append(
+        {"at": timezone.now().astimezone(NY).strftime("%H:%M"), **changed})
+    a.meta = meta
+    a.save(update_fields=fields)
+    return {"alert_id": alert_id, "changed": changed}
+
+
+@skill(
+    "close_position",
+    "Cierra YA una posicion abierta al precio actual (no esperas al objetivo ni "
+    "al stop). Usalo si la tesis se rompio o ya conseguiste lo que querias.",
+    {
+        "type": "object",
+        "properties": {
+            "alert_id": {"type": "integer"},
+            "reason": {"type": "string", "description": "Por que cierras ahora."},
+        },
+        "required": ["alert_id", "reason"],
+    },
+)
+def close_position(ctx, alert_id: int, reason: str):
+    from django.utils import timezone
+
+    from ..models import Alert
+    provider = _provider()
+    try:
+        a = Alert.objects.get(id=alert_id, source=Alert.Source.AGENT,
+                              status=Alert.Status.PENDING)
+    except Alert.DoesNotExist:
+        return {"error": "posicion no encontrada o ya cerrada"}
+    entry = float(a.underlying_at_signal or (a.meta or {}).get("entry_price") or 0)
+    try:
+        price = float(provider.latest_price(a.symbol))
+    except Exception:
+        return {"error": "sin precio actual para cerrar"}
+    if not entry:
+        return {"error": "sin precio de entrada"}
+    move = (price - entry) / entry * 100
+    ret = move if a.direction == "CALL" else -move
+    a.status = Alert.Status.CLOSED
+    a.exit_ts = timezone.now()
+    a.exit_reason = f"agente: {reason}"[:40]
+    a.net_pct = round(ret, 2)
+    meta = dict(a.meta or {})
+    meta.update({"exit_price": round(price, 2), "move_pct": round(move, 2),
+                 "return_pct": round(ret, 2), "win": ret > 0,
+                 "exit_reason": "agente"})
+    a.meta = meta
+    a.save(update_fields=["status", "exit_ts", "exit_reason", "net_pct",
+                          "meta", "updated_at"])
+    return {"alert_id": alert_id, "closed": True, "return_pct": round(ret, 2)}
+
+
+@skill(
     "get_my_track_record",
     "Tu expediente real: como te fue con las alertas que YA lanzaste y se "
     "cerraron (acierto direccional del subyacente). Consultalo para ser honesto "

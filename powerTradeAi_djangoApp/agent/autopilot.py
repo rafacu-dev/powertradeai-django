@@ -12,17 +12,20 @@ import time
 
 class AgentAutopilot:
     def __init__(self, symbols: list[str], interval: int = 1800,
-                 move_threshold: float = 0.7, min_gap: int = 600):
+                 move_threshold: float = 0.7, min_gap: int = 600,
+                 review_interval: int = 300):
         self.symbols = symbols
         self.interval = interval            # revision periodica (s)
         self.move_threshold = move_threshold  # % de movimiento que dispara
         self.min_gap = min_gap              # rate-limit por activo (s)
+        # Con posicion ABIERTA se revisa mas seguido para gestionarla.
+        self.review_interval = review_interval
         self.state = {s: {"last_run": None, "last_price": None} for s in symbols}
 
     def tick(self, provider) -> list[tuple[str, str]]:
         """Revisa los activos y corre el agente en los que toque. Devuelve una
         lista de (symbol, mensaje) de lo que hizo, para loguear."""
-        from ..models import AgentTrigger
+        from ..models import AgentTrigger, Alert
 
         events: list[tuple[str, str]] = []
 
@@ -31,8 +34,14 @@ class AgentAutopilot:
         for t in AgentTrigger.objects.filter(active=True):
             triggers.setdefault(t.symbol, []).append(t)
 
-        # Se vigilan los activos base MAS cualquiera con triggers activos.
-        symbols = list(dict.fromkeys(self.symbols + list(triggers.keys())))
+        # Activos con posicion abierta del agente (para gestionarla mas seguido).
+        open_syms = set(Alert.objects.filter(
+            source=Alert.Source.AGENT, status=Alert.Status.PENDING,
+        ).values_list("symbol", flat=True))
+
+        # Se vigilan los activos base MAS cualquiera con triggers o posicion.
+        symbols = list(dict.fromkeys(
+            self.symbols + list(triggers.keys()) + list(open_syms)))
 
         now = time.monotonic()
         for sym in symbols:
@@ -51,8 +60,18 @@ class AgentAutopilot:
                           st, events, hit_triggers=hit)
                 continue
 
-            # 2) Periodico + evento de movimiento, con rate-limit.
             last_run, base = st["last_run"], st["last_price"]
+
+            # 2) Posicion abierta: revisar mas seguido para gestionarla.
+            if sym in open_syms and (last_run is None or
+                                     (now - last_run) >= self.review_interval):
+                self._run(provider, sym, price,
+                          "tienes una posicion ABIERTA en este activo: "
+                          "revisala y gestionala (mantener, ajustar stop/target "
+                          "o cerrar)", st, events)
+                continue
+
+            # 3) Periodico + evento de movimiento, con rate-limit.
             if last_run is not None and (now - last_run) < self.min_gap:
                 continue
             periodic = last_run is None or (now - last_run) >= self.interval
