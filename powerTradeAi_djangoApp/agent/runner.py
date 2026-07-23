@@ -36,7 +36,10 @@ va antes que buscar nuevas entradas.
 1. Recupera tu contexto: get_prior_analysis, get_notes y get_my_track_record \
 del activo. No empieces de cero; continua tu razonamiento anterior y se honesto \
 con como te ha ido (si tus PUTs van mal, se mas exigente con ellos).
-2. Lee el estado actual: get_intraday_stats y get_market_data. Mira el \
+2. Lee el estado actual: get_intraday_stats, get_market_data y get_trendlines \
+(lineas de tendencia diagonales y niveles de soporte/resistencia). Fijate si el \
+precio respeta una tendencia clara (p.ej. resistencia bajista): opera A FAVOR \
+de la estructura o en rupturas/rechazos confirmados de esas lineas. Mira el \
 historico si necesitas contexto.
 3. Antes de operar una idea, VALIDALA: usa backtest_reversion u otra evidencia; \
 no operes por corazonada.

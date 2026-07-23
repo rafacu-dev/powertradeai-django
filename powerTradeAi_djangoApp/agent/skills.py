@@ -715,6 +715,109 @@ def backtest_reversion(ctx, symbol: str, days: int = 15, max_hold_bars: int = 8)
     }
 
 
+def _cluster_levels(prices, tol=0.004):
+    """Agrupa precios cercanos en niveles horizontales (soporte/resistencia).
+    Un nivel con >=2 toques es relevante."""
+    prices = sorted(prices)
+    clusters = []
+    for p in prices:
+        if clusters and abs(p - clusters[-1]["p"]) / clusters[-1]["p"] <= tol:
+            c = clusters[-1]
+            c["vals"].append(p)
+            c["p"] = sum(c["vals"]) / len(c["vals"])
+        else:
+            clusters.append({"p": p, "vals": [p]})
+    return [{"price": round(c["p"], 2), "touches": len(c["vals"])}
+            for c in clusters if len(c["vals"]) >= 2]
+
+
+@skill(
+    "get_trendlines",
+    "Detecta lineas de tendencia DIAGONALES (resistencia bajista uniendo maximos "
+    "descendentes, soporte alcista uniendo minimos ascendentes) y niveles "
+    "horizontales de soporte/resistencia. Devuelve donde esta cada linea AHORA y "
+    "el precio respecto a ellas, para buscar rechazos, rupturas y puntos de "
+    "entrada.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "timeframe": {"type": "string", "enum": ["15m", "1h", "1d"],
+                          "description": "Temporalidad (1h capta la tendencia del dia)."},
+            "lookback_days": {"type": "integer", "description": "Dias atras (max 30)."},
+        },
+        "required": ["symbol"],
+    },
+)
+def get_trendlines(ctx, symbol: str, timeframe: str = "1h",
+                   lookback_days: int = 15):
+    import numpy as np
+
+    provider = _provider()
+    sym = symbol.upper()
+    end = _now(ctx).date()
+    bars = _bars_upto(ctx, provider, sym,
+                      end - timedelta(days=min(int(lookback_days), 30)), end, timeframe)
+    if bars.empty or len(bars) < 15:
+        return {"symbol": sym, "error": "pocas velas"}
+
+    highs = bars["high"].values.astype(float)
+    lows = bars["low"].values.astype(float)
+    n = len(bars)
+    w = 3
+    sh, sl = [], []  # (indice, precio) de swings
+    for i in range(w, n - w):
+        if highs[i] == highs[i - w:i + w + 1].max():
+            sh.append((i, highs[i]))
+        if lows[i] == lows[i - w:i + w + 1].min():
+            sl.append((i, lows[i]))
+
+    def fit(points, kind):
+        if len(points) < 2:
+            return None
+        xs = np.array([p[0] for p in points], float)
+        ys = np.array([p[1] for p in points], float)
+        slope, intercept = np.polyfit(xs, ys, 1)
+        current = slope * (n - 1) + intercept
+        pct_per_bar = slope / current * 100 if current else 0
+        if kind == "resistencia":
+            direction = "bajista" if slope < 0 else "alcista/plana"
+        else:
+            direction = "alcista" if slope > 0 else "bajista/plana"
+        return {"current_value": round(float(current), 2),
+                "slope_per_bar": round(float(slope), 3),
+                "pct_por_vela": round(float(pct_per_bar), 3),
+                "toques": len(points), "direccion": direction}
+
+    res = fit(sh[-4:], "resistencia")
+    sup = fit(sl[-4:], "soporte")
+    levels = _cluster_levels([p[1] for p in sh] + [p[1] for p in sl])
+
+    try:
+        price = _spot(ctx, provider, sym)
+    except Exception:
+        price = float(bars["close"].iloc[-1])
+    above = sorted([l for l in levels if l["price"] > price], key=lambda x: x["price"])
+    below = sorted([l for l in levels if l["price"] < price],
+                   key=lambda x: -x["price"])
+
+    def rel(line):
+        if not line:
+            return None
+        d = (price - line["current_value"]) / line["current_value"] * 100
+        pos = "por encima" if d > 0.1 else "por debajo" if d < -0.1 else "justo en"
+        return f"{pos} ({d:+.2f}%)"
+
+    return {
+        "symbol": sym, "timeframe": timeframe, "price": round(price, 2),
+        "resistencia_diagonal": res, "precio_vs_resistencia": rel(res),
+        "soporte_diagonal": sup, "precio_vs_soporte": rel(sup),
+        "resistencia_horizontal_mas_cercana": above[0] if above else None,
+        "soporte_horizontal_mas_cercano": below[0] if below else None,
+        "niveles_horizontales": levels,
+    }
+
+
 @skill(
     "save_note",
     "Guarda una nota en tu cuaderno de day-trader (ideas, patrones, reglas que "
@@ -758,25 +861,36 @@ def get_open_positions(ctx, symbol: str | None = None):
         qs = qs.filter(entry_ts__isnull=False, entry_ts__lte=as_of)
     out = []
     now = _now(ctx)
+    at = ctx.get("as_of")
     for a in qs:
-        entry = float(a.underlying_at_signal or (a.meta or {}).get("entry_price") or 0)
         try:
-            price = _spot(ctx, provider, a.symbol)
+            und = _spot(ctx, provider, a.symbol)
         except Exception:
-            price = None
-        unreal = None
-        if entry and price:
-            move = (price - entry) / entry * 100
-            unreal = round(move if a.direction == "CALL" else -move, 2)
+            und = None
+        # P&L NO REALIZADO DE LA OPCION: bid actual del contrato vs prima pagada.
+        opt_bid = opt_unreal = None
+        if a.occ_symbol and a.entry_ask:
+            try:
+                q = provider.option_quote(a.occ_symbol, at=at) if at \
+                    else provider.option_quote(a.occ_symbol)
+                opt_bid = float(getattr(q, "bid", 0) or 0) if q else None
+            except Exception:
+                opt_bid = None
+            if opt_bid:
+                opt_unreal = round((opt_bid - float(a.entry_ask)) /
+                                   float(a.entry_ask) * 100, 2)
         mins = int((now - a.entry_ts).total_seconds() / 60) if a.entry_ts else None
         meta = a.meta or {}
         out.append({
             "alert_id": a.id, "symbol": a.symbol, "direction": a.direction,
-            "entry": round(entry, 2) if entry else None,
-            "price": round(price, 2) if price else None,
-            "unrealized_pct": unreal, "target_pct": meta.get("target_pct"),
-            "stop_pct": meta.get("stop_pct"), "minutes_open": mins,
-            "thesis": meta.get("thesis", ""),
+            "contrato": a.occ_symbol, "strike": float(a.strike) if a.strike else None,
+            "contratos": a.contracts,
+            "prima_entrada": float(a.entry_ask) if a.entry_ask else None,
+            "prima_actual_bid": opt_bid, "coste": meta.get("cost"),
+            "opcion_unrealized_pct": opt_unreal,   # <- lo que importa
+            "subyacente_actual": round(und, 2) if und else None,
+            "target_pct": meta.get("target_pct"), "stop_pct": meta.get("stop_pct"),
+            "minutes_open": mins, "thesis": meta.get("thesis", ""),
         })
     return {"open": out}
 
@@ -852,27 +966,41 @@ def close_position(ctx, alert_id: int, reason: str):
                               status=Alert.Status.PENDING)
     except Alert.DoesNotExist:
         return {"error": "posicion no encontrada o ya cerrada"}
-    entry = float(a.underlying_at_signal or (a.meta or {}).get("entry_price") or 0)
+    if not a.occ_symbol or not a.entry_ask:
+        return {"error": "posicion sin contrato de opcion asociado"}
+
+    # Cerrar la OPCION: se vende al bid actual del contrato.
+    at = ctx.get("as_of")
     try:
-        price = _spot(ctx, provider, a.symbol)
-    except Exception:
-        return {"error": "sin precio actual para cerrar"}
-    if not entry:
-        return {"error": "sin precio de entrada"}
-    move = (price - entry) / entry * 100
-    ret = move if a.direction == "CALL" else -move
+        q = provider.option_quote(a.occ_symbol, at=at) if at \
+            else provider.option_quote(a.occ_symbol)
+    except Exception as exc:
+        return {"error": f"sin quote para cerrar: {exc}"}
+    exit_bid = float(getattr(q, "bid", 0) or 0) if q else 0
+    if not exit_bid:
+        return {"error": "sin bid de la opcion para cerrar ahora"}
+
+    entry_ask = float(a.entry_ask)
+    n = a.contracts or 1
+    opt_ret = (exit_bid - entry_ask) / entry_ask * 100
+    net_d = (exit_bid - entry_ask) * 100 * n - float(a.commission) * n
+
     a.status = Alert.Status.CLOSED
     a.exit_ts = _now(ctx)
     a.exit_reason = f"agente: {reason}"[:40]
-    a.net_pct = round(ret, 2)
+    a.exit_premium = round(exit_bid, 4)
+    a.net_pct = round(opt_ret, 2)
+    a.net_dollars = round(net_d, 2)
     meta = dict(a.meta or {})
-    meta.update({"exit_price": round(price, 2), "move_pct": round(move, 2),
-                 "return_pct": round(ret, 2), "win": ret > 0,
+    meta.update({"exit_premium": round(exit_bid, 4),
+                 "option_return_pct": round(opt_ret, 2),
+                 "net_dollars": round(net_d, 2), "win": opt_ret > 0,
                  "exit_reason": "agente"})
     a.meta = meta
-    a.save(update_fields=["status", "exit_ts", "exit_reason", "net_pct",
-                          "meta", "updated_at"])
-    return {"alert_id": alert_id, "closed": True, "return_pct": round(ret, 2)}
+    a.save(update_fields=["status", "exit_ts", "exit_reason", "exit_premium",
+                          "net_pct", "net_dollars", "meta", "updated_at"])
+    return {"alert_id": alert_id, "closed": True,
+            "option_return_pct": round(opt_ret, 2), "net_dollars": round(net_d, 2)}
 
 
 @skill(
