@@ -416,9 +416,9 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
     "Compra una OPCION real (CALL o PUT) y registra la operacion. TU eliges el "
     "contrato: strike, dias al vencimiento (dte) y cuantos contratos, segun tu "
     "tesis y la gestion de riesgo (mira get_option_chain y get_account primero). "
-    "Se registra la prima de entrada (ask) real de ThetaData; al cerrar se mide "
-    "el P&L de la opcion (bid), con su apalancamiento. target/stop son sobre el "
-    "movimiento del SUBYACENTE (tu tesis de precio); el resultado es de la opcion.",
+    "Se registra la prima de entrada (ask) real de ThetaData. target_pct y "
+    "stop_pct son sobre la PRIMA de la opcion (no el activo): asi el objetivo es "
+    "ganancia real y el stop controla el theta. Cierra por lo que ocurra primero.",
     {
         "type": "object",
         "properties": {
@@ -435,9 +435,13 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
             "horizon_minutes": {"type": "integer",
                                 "description": "Cuanto vale tu tesis (def. 120)."},
             "target_pct": {"type": "number",
-                           "description": "Objetivo en %% del SUBYACENTE (opcional)."},
+                           "description": "Objetivo de ganancia en %% de la PRIMA "
+                                          "de la opcion (p.ej. 30 = vender si la "
+                                          "prima sube 30%%)."},
             "stop_pct": {"type": "number",
-                         "description": "Stop en %% del SUBYACENTE (opcional)."},
+                         "description": "Stop de perdida en %% de la PRIMA (p.ej. "
+                                        "20 = vender si la prima cae 20%%). Asi "
+                                        "controlas el theta."},
         },
         "required": ["symbol", "direction", "thesis"],
     },

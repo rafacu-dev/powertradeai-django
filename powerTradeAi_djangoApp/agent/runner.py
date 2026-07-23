@@ -58,8 +58,9 @@ mas barato pero menos probable. Elige el contrato segun tu tesis.
 mas del maximo por operacion (en una opcion comprada, el maximo que pierdes es \
 la prima pagada).
    c. Lanza create_alert con symbol, direction, strike, dte, contracts, y \
-target_pct/stop_pct sobre el subyacente. Se registra la prima real y al cerrar \
-se mide el P&L de la OPCION (apalancado).
+target_pct/stop_pct SOBRE LA PRIMA de la opcion (p.ej. target 30%, stop 20%): \
+asi el objetivo es ganancia real y el stop corta el theta. NO uses % del activo \
+para el riesgo: una opcion se mueve mucho mas que el subyacente.
 Solo opera con tesis clara y buen momento; mas vale esperar que forzar. Un buen \
 trade tiene el riesgo definido de antemano y el theta a favor o controlado.
 

@@ -93,16 +93,64 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
     bars_cache: dict = {}
     closed = []
     for a in pending:
-        entry = a.underlying_at_signal
-        if entry is None:
-            entry = (a.meta or {}).get("entry_price")
+        meta = dict(a.meta or {})
+        target_pct = meta.get("target_pct")
+        stop_pct = meta.get("stop_pct")
+
+        # ── Ruta OPCION: target/stop sobre la PRIMA del contrato ──
+        if a.occ_symbol and a.entry_ask:
+            entry_ask = float(a.entry_ask)
+            window_end = min(a.scheduled_exit_ts, now)
+            try:
+                series = provider.option_quotes(
+                    a.occ_symbol, a.entry_ts, window_end, interval="1m")
+            except Exception:
+                series = None
+
+            outcome = _walk_option_premium(series, entry_ask, target_pct, stop_pct)
+            if outcome is None:
+                if now < a.scheduled_exit_ts and not force:
+                    continue  # sigue viva
+                # Horizonte o cierre forzado: salir al ultimo bid conocido.
+                exit_bid = _last_bid(series)
+                if exit_bid is None:
+                    exit_bid = _option_bid(provider, a.occ_symbol, window_end)
+                if exit_bid is None:
+                    continue
+                reason = ("cierre_sesion"
+                          if force and now < a.scheduled_exit_ts else "horizonte")
+                exit_ts = window_end
+            else:
+                reason, exit_bid, exit_ts = outcome
+
+            n = a.contracts or 1
+            opt_ret = (exit_bid - entry_ask) / entry_ask * 100
+            net_d = (exit_bid - entry_ask) * 100 * n - float(a.commission) * n
+            a.status = Alert.Status.CLOSED
+            a.exit_ts = exit_ts
+            a.exit_reason = reason
+            a.exit_premium = round(exit_bid, 4)
+            a.net_pct = round(opt_ret, 2)
+            a.net_dollars = round(net_d, 2)
+            meta.update({"exit_premium": round(exit_bid, 4),
+                         "option_return_pct": round(opt_ret, 2),
+                         "net_dollars": round(net_d, 2),
+                         "win": opt_ret > 0, "exit_reason": reason})
+            a.meta = meta
+            a.save(update_fields=[
+                "status", "exit_ts", "exit_reason", "exit_premium", "net_pct",
+                "net_dollars", "meta", "updated_at"])
+            closed.append(a)
+            continue
+
+        # ── Ruta LEGACY (sin contrato): target/stop sobre el subyacente ──
+        entry = a.underlying_at_signal or meta.get("entry_price")
         entry = float(entry) if entry is not None else None
         if not entry:
             a.status = Alert.Status.ERROR
             a.exit_reason = "sin_entrada"
             a.save(update_fields=["status", "exit_reason", "updated_at"])
             continue
-
         key = (a.symbol, a.session_date)
         if key not in bars_cache:
             try:
@@ -113,19 +161,12 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
         bars = bars_cache[key]
         if bars is None or bars.empty:
             continue
-
-        meta = dict(a.meta or {})
         window_end = min(a.scheduled_exit_ts, now)
         seg = bars[(bars.index >= a.entry_ts) & (bars.index <= window_end)]
-
-        outcome = _walk_target_stop(
-            a.direction, entry, seg, meta.get("target_pct"), meta.get("stop_pct"))
-
+        outcome = _walk_target_stop(a.direction, entry, seg, target_pct, stop_pct)
         if outcome is None:
-            # No se toco objetivo ni stop.
             if now < a.scheduled_exit_ts and not force:
-                continue  # sigue viva
-            # Cerrar al horizonte, o al reloj actual si es un cierre forzado.
+                continue
             close_ts = min(a.scheduled_exit_ts, now)
             exit_price = _price_at(provider, a.symbol, close_ts)
             if exit_price is None:
@@ -135,51 +176,51 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
             exit_ts = close_ts
         else:
             reason, exit_price, exit_ts = outcome
-
-        # Movimiento del subyacente (referencia de la tesis).
         move_pct = (exit_price - entry) / entry * 100
         und_ret = move_pct if a.direction == Alert.Direction.CALL else -move_pct
-
         a.status = Alert.Status.CLOSED
         a.exit_ts = exit_ts
         a.exit_reason = reason
-        meta.update({"exit_price": round(exit_price, 2),
-                     "move_pct": round(move_pct, 2),
+        a.net_pct = round(und_ret, 2)
+        meta.update({"exit_price": round(exit_price, 2), "move_pct": round(move_pct, 2),
                      "underlying_return_pct": round(und_ret, 2),
-                     "exit_reason": reason})
-
-        # P&L REAL de la OPCION: sale al bid del contrato en exit_ts. Aqui esta
-        # el apalancamiento (spike) que el subyacente no muestra.
-        fields = ["status", "exit_ts", "exit_reason", "net_pct", "meta",
-                  "updated_at"]
-        if a.occ_symbol and a.entry_ask:
-            exit_bid = _option_bid(provider, a.occ_symbol, exit_ts)
-            if exit_bid is not None:
-                entry_ask = float(a.entry_ask)
-                n = a.contracts or 1
-                opt_ret = (exit_bid - entry_ask) / entry_ask * 100
-                gross = (exit_bid - entry_ask) * 100 * n
-                net_d = gross - float(a.commission) * n
-                a.exit_premium = round(exit_bid, 4)
-                a.net_pct = round(opt_ret, 2)
-                a.net_dollars = round(net_d, 2)
-                meta.update({"exit_premium": round(exit_bid, 4),
-                             "option_return_pct": round(opt_ret, 2),
-                             "net_dollars": round(net_d, 2),
-                             "win": opt_ret > 0})
-                fields += ["exit_premium", "net_dollars"]
-            else:
-                # Sin bid de salida: no inventamos; caemos al % del subyacente.
-                a.net_pct = round(und_ret, 2)
-                meta.update({"win": und_ret > 0, "option_pnl": "sin_bid_salida"})
-        else:
-            a.net_pct = round(und_ret, 2)
-            meta.update({"win": und_ret > 0})
-
+                     "win": und_ret > 0, "exit_reason": reason})
         a.meta = meta
-        a.save(update_fields=fields)
+        a.save(update_fields=["status", "exit_ts", "exit_reason", "net_pct",
+                              "meta", "updated_at"])
         closed.append(a)
     return closed
+
+
+def _walk_option_premium(series, entry_ask, target_pct, stop_pct):
+    """Recorre la serie de primas buscando el primer toque de objetivo o stop
+    SOBRE LA PRIMA (bid). Objetivo = subir target_pct%; stop = caer stop_pct%.
+    Si ambos en la misma vela, asume el STOP (conservador). Devuelve
+    (reason, exit_bid, ts) o None."""
+    if series is None or getattr(series, "empty", True):
+        return None
+    if not target_pct and not stop_pct:
+        return None
+    tgt = entry_ask * (1 + target_pct / 100) if target_pct else None
+    stp = entry_ask * (1 - stop_pct / 100) if stop_pct else None
+    for ts, row in series.iterrows():
+        bid = float(row.get("bid", 0) or 0)
+        if bid <= 0:
+            continue
+        stop_hit = stp is not None and bid <= stp
+        tgt_hit = tgt is not None and bid >= tgt
+        if stop_hit:
+            return ("stop", bid, ts)
+        if tgt_hit:
+            return ("target", bid, ts)
+    return None
+
+
+def _last_bid(series):
+    if series is None or getattr(series, "empty", True):
+        return None
+    valid = series[series["bid"] > 0]
+    return float(valid["bid"].iloc[-1]) if not valid.empty else None
 
 
 def _option_bid(provider, occ, at):
