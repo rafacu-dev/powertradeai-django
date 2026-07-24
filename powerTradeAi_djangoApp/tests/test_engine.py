@@ -187,6 +187,105 @@ def test_invalidacion_cierra_antes_que_el_reloj():
     assert alert.net_dollars == Decimal("-31.30")
 
 
+class FakeProviderWithSeries(FakeProvider):
+    """FakeProvider + serie de quotes de opcion para probar el stop de prima.
+
+    ``bid_series`` es {"09:56": 0.84, ...} en hora ET; ``option_quotes`` devuelve
+    la sub-ventana [start, end] con indice UTC, como el proveedor real.
+    """
+
+    def __init__(self, bars, bid_series: dict[str, float], quotes=None):
+        super().__init__(bars, quotes)
+        index, rows = [], []
+        for hhmm, bid in bid_series.items():
+            hh, mm = (int(x) for x in hhmm.split(":"))
+            index.append(pd.Timestamp(datetime(
+                SESSION.year, SESSION.month, SESSION.day, hh, mm, tzinfo=NY)))
+            rows.append({"bid": bid, "ask": bid + 0.05})
+        self._series = pd.DataFrame(
+            rows, index=pd.DatetimeIndex(index).tz_convert("UTC"))
+
+    def option_quotes(self, occ, start, end, interval="1s"):
+        s = _utc_pt(start)
+        e = _utc_pt(end)
+        return self._series[(self._series.index >= s) & (self._series.index <= e)]
+
+
+def _utc_pt(ts) -> pd.Timestamp:
+    t = pd.Timestamp(ts)
+    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+
+@pytest.mark.django_db
+def test_stop15_cierra_cuando_el_bid_cae_15pct_antes_del_reloj():
+    """La variante STOP15 corta cuando el BID cae >=15% del ASK de entrada, y lo
+    hace antes que la salida por tiempo. Es la unica diferencia con la base."""
+    Strategy.objects.create(
+        strategy_id="SPY_ORB15_0950_RANGE_INVALID_STOP15",
+        name="STOP15", symbol="SPY",
+        rule_version="orb15_0950_range_invalid_stop15_causal_v1", params={},
+    )
+    # Quiebre al alza a las 09:50 (variante 9:50) -> CALL. Rango plano en 100,
+    # nunca se regresa dentro: aisla el stop de la invalidacion.
+    bars = _bars({**_flat_range(), "09:50": 105.0, "09:55": 106.0})
+    # Entrada al ASK=1.00 -> umbral de stop = 0.85. El bid se hunde a 0.84 a las
+    # 09:56, por debajo del umbral.
+    provider = FakeProviderWithSeries(
+        bars,
+        bid_series={"09:52": 0.98, "09:54": 0.90, "09:56": 0.84},
+        quotes={
+            "at_entry": Quote(bid=0.95, ask=1.00),
+            "at_exit": Quote(bid=0.84, ask=0.89),
+        },
+    )
+
+    scan_once(datetime(2026, 7, 15, 9, 52, tzinfo=NY), provider)
+    alert = Alert.objects.get()
+    assert alert.status == Alert.Status.PENDING
+    assert alert.entry_premium == Decimal("1.0000")
+
+    # 09:57, muchisimo antes del hold de 30 min: manda el stop de prima.
+    assert resolve_pending(
+        datetime(2026, 7, 15, 9, 57, tzinfo=NY), provider) == 1
+    alert.refresh_from_db()
+    assert alert.status == Alert.Status.CLOSED
+    assert alert.exit_reason == "option_stop"
+    assert alert.exit_premium == Decimal("0.8400")
+    # (0.84 - 1.00) * 100 - 1.30 = -17.30
+    assert alert.net_dollars == Decimal("-17.30")
+
+
+@pytest.mark.django_db
+def test_stop15_no_dispara_si_el_bid_se_mantiene_y_deja_correr_el_reloj():
+    """Si el bid nunca cae 15%, STOP15 se comporta igual que la base: cierra por
+    tiempo. El stop es aditivo, no cambia el resto de la regla."""
+    Strategy.objects.create(
+        strategy_id="SPY_ORB15_0950_RANGE_INVALID_STOP15",
+        name="STOP15", symbol="SPY",
+        rule_version="orb15_0950_range_invalid_stop15_causal_v1", params={},
+    )
+    bars = _bars({**_flat_range(), "09:50": 105.0, "09:55": 106.0})
+    provider = FakeProviderWithSeries(
+        bars,
+        bid_series={"09:52": 0.98, "09:54": 0.97, "09:56": 0.99},
+        quotes={
+            "at_entry": Quote(bid=0.95, ask=1.00),
+            "at_exit": Quote(bid=1.20, ask=1.25),
+        },
+    )
+
+    scan_once(datetime(2026, 7, 15, 9, 52, tzinfo=NY), provider)
+    # 09:57: el bid no toco el umbral 0.85 -> no cierra todavia.
+    assert resolve_pending(
+        datetime(2026, 7, 15, 9, 57, tzinfo=NY), provider) == 0
+    # Pasado el hold (entrada 09:52 + 30 = 10:22): cierra por tiempo.
+    assert resolve_pending(
+        datetime(2026, 7, 15, 10, 23, tzinfo=NY), provider) == 1
+    alert = Alert.objects.get()
+    assert alert.exit_reason == "time_exit"
+    assert alert.exit_premium == Decimal("1.2000")
+
+
 @pytest.mark.django_db
 def test_sin_quote_de_salida_no_se_inventa_un_resultado():
     Strategy.objects.create(

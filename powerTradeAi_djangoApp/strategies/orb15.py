@@ -26,6 +26,13 @@ BUF = 0.0002          # buffer del quiebre (regla validada)
 HOLD_MIN = 30         # salida por tiempo (regla validada)
 RANGE_BARS = 15       # 09:30..09:44, sin rellenar minutos ausentes
 STRIKE_DEPTH = 8      # niveles ITM que busca el replay causal
+STOP_PCT = 15.0       # % de caida del BID vs ASK de entrada que dispara el stop
+STOP_LEAD_SECONDS = 1.0   # el tick de entrada no cuenta como stop (spread inicial)
+
+
+def _utc(ts) -> pd.Timestamp:
+    t = pd.Timestamp(ts)
+    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
 
 
 class Orb15Base(BaseStrategy):
@@ -220,3 +227,86 @@ class SpyOrb150950RangeInvalid(Orb15Base):
         "watch_from": "09:50",
         "range_invalidation": True,
     }
+
+
+@register
+class SpyOrb150950RangeInvalidStop15(SpyOrb150950RangeInvalid):
+    """Igual que la base 9:50 + invalidacion, con un stop causal sobre la PRIMA.
+
+    Es GESTION DE RIESGO sobre la regla existente, no una regla nueva: misma
+    senal de entrada, mismo contrato, misma invalidacion por regreso al rango y
+    misma salida por tiempo. La unica diferencia es un stop adicional: cierra si
+    el BID de la opcion cae ``option_stop_pct``% por debajo del ASK de entrada.
+
+    De los tres eventos posibles (stop, invalidacion, tiempo) gana el que ocurra
+    ANTES en el tiempo. El stop es causal: solo mira quotes hasta ``ctx.now`` y,
+    si no hay serie de quotes, NO cierra (deja mandar al reloj) en lugar de
+    inventarse el motivo del cierre.
+    """
+
+    strategy_id = "SPY_ORB15_0950_RANGE_INVALID_STOP15"
+    name = "SPY ORB-15 9:50 + invalidacion + stop 15% prima"
+    rule_version = "orb15_0950_range_invalid_stop15_causal_v1"
+    default_params = {
+        **SpyOrb150950RangeInvalid.default_params,
+        "option_stop_pct": STOP_PCT,
+        "option_stop_lead_seconds": STOP_LEAD_SECONDS,
+    }
+
+    def check_exit(self, ctx: ScanContext, alert) -> ExitDecision:
+        # La base decide invalidacion/rango; aqui se suma el stop de prima y
+        # gana el evento causalmente MAS TEMPRANO. En empate exacto gana el stop
+        # (supuesto conservador, igual que el replay causal del proyecto).
+        fired = [
+            d for d in (super().check_exit(ctx, alert),
+                        self._option_stop_exit(ctx, alert))
+            if d.should_exit
+        ]
+        if not fired:
+            return ExitDecision(should_exit=False)
+        return min(fired, key=lambda d: (
+            _utc(d.at) if d.at is not None else _utc(ctx.now),
+            0 if d.reason == "option_stop" else 1,
+        ))
+
+    def _option_stop_exit(self, ctx: ScanContext, alert) -> ExitDecision:
+        """Primer BID <= ask_entrada*(1 - stop%) observado tras la entrada.
+
+        Causal: solo mira quotes hasta ``ctx.now``. Excluye el arranque
+        (``option_stop_lead_seconds``) para que el spread del propio tick de
+        entrada no dispare un stop instantaneo.
+        """
+        if alert.entry_ts is None or alert.entry_ask is None or not alert.occ_symbol:
+            return ExitDecision(should_exit=False)
+
+        stop_pct = float(self.params["option_stop_pct"])
+        threshold = float(alert.entry_ask) * (1.0 - stop_pct / 100.0)
+
+        entry_ts = _utc(alert.entry_ts)
+        start = entry_ts + pd.Timedelta(
+            seconds=float(self.params["option_stop_lead_seconds"]))
+        now = _utc(ctx.now)
+        if now < start:
+            return ExitDecision(should_exit=False)
+
+        try:
+            quotes = ctx.provider.option_quotes(
+                alert.occ_symbol, entry_ts.to_pydatetime(), now.to_pydatetime())
+        except Exception:
+            # Sin serie de quotes el stop queda INDETERMINADO: no se cierra.
+            return ExitDecision(should_exit=False)
+        if quotes is None or quotes.empty:
+            return ExitDecision(should_exit=False)
+
+        window = quotes[quotes.index >= start]
+        if window.empty:
+            return ExitDecision(should_exit=False)
+        bids = pd.to_numeric(window["bid"], errors="coerce")
+        # Un bid<=0 no es "cayo 15%": es ausencia de mercado. Se excluye para no
+        # fabricar un stop con una quote muerta.
+        breach = window[(bids > 0) & (bids <= threshold)]
+        if breach.empty:
+            return ExitDecision(should_exit=False)
+        return ExitDecision(
+            should_exit=True, reason="option_stop",
+            at=_utc(breach.index[0]).to_pydatetime())
