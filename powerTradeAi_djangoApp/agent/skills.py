@@ -1008,6 +1008,128 @@ def close_position(ctx, alert_id: int, reason: str):
 
 
 @skill(
+    "reinforce_position",
+    "REFUERZA una posicion abierta que ya toco su stop: compra la MISMA cantidad "
+    "de contratos del mismo contrato al precio actual y promedia la prima. Es la "
+    "rama 'la tesis sigue viva' de la decision en el stop; la otra rama, la normal, "
+    "es close_position. AVISO de tu propia evidencia: en el backtest, reforzar al "
+    "tocar el stop fue PERDEDOR el 94%% de las veces (cerrar gano en PF y retorno). "
+    "Solo refuerza con una CONFIRMACION nueva y objetiva (un cierre 15m mas alla "
+    "del nivel, un rechazo de VWAP, una diagonal que aguanta), no 'sigo creyendo'. "
+    "Gates: solo si el stop esta tocado, una sola vez por posicion, nunca en 0DTE, "
+    "y sin pasarte del riesgo maximo por operacion.",
+    {
+        "type": "object",
+        "properties": {
+            "alert_id": {"type": "integer"},
+            "confirmation": {
+                "type": "string",
+                "description": "El evento NUEVO y objetivo que confirma la tesis "
+                               "(nivel, precio, vela). Se registra para auditoria."},
+        },
+        "required": ["alert_id", "confirmation"],
+    },
+)
+def reinforce_position(ctx, alert_id: int, confirmation: str):
+    from django.conf import settings
+
+    from ..models import Alert
+
+    # Gate 0: por ahora la capacidad esta EN EVALUACION -> solo entrenamiento.
+    if not _is_training(ctx):
+        return {"error": "reinforce_position esta en evaluacion; por ahora solo "
+                         "en entrenamiento. En vivo, usa close_position."}
+    if not confirmation or not confirmation.strip():
+        return {"error": "reforzar exige una confirmacion nueva y objetiva; sin "
+                         "ella, cierra con close_position"}
+
+    provider = _provider()
+    try:
+        a = Alert.objects.get(id=alert_id, source=_alert_source(ctx),
+                              status=Alert.Status.PENDING)
+    except Alert.DoesNotExist:
+        return {"error": "posicion no encontrada o ya cerrada"}
+    if not a.occ_symbol or not a.entry_ask:
+        return {"error": "posicion sin contrato de opcion asociado"}
+
+    meta = dict(a.meta or {})
+    # Gate 1: una sola vez por posicion.
+    if meta.get("reinforced"):
+        return {"error": "esta posicion ya se reforzo una vez; no se puede otra. "
+                         "Si vuelve a tocar el stop, cierra."}
+    # Gate 2: nunca en 0DTE (no hay tiempo de recuperar).
+    if int(meta.get("dte") or 0) == 0:
+        return {"error": "no se refuerza un 0DTE: sin tiempo para recuperar. Cierra."}
+    stop_pct = meta.get("stop_pct")
+    if not stop_pct:
+        return {"error": "la posicion no tiene stop definido; reforzar solo tiene "
+                         "sentido en el punto de decision del stop"}
+
+    # Quote actual: sirve para el gate del stop y para el precio del refuerzo.
+    at = ctx.get("as_of")
+    try:
+        q = provider.option_quote(a.occ_symbol, at=at) if at \
+            else provider.option_quote(a.occ_symbol)
+    except Exception as exc:
+        return {"error": f"sin quote para reforzar: {exc}"}
+    cur_bid = float(getattr(q, "bid", 0) or 0) if q else 0
+    add_ask = float(getattr(q, "ask", 0) or 0) if q else 0
+    if not cur_bid or not add_ask:
+        return {"error": "sin bid/ask utilizable del contrato ahora mismo"}
+
+    entry_ask = float(a.entry_ask)
+    # Gate 3: el stop DEBE estar tocado (bid <= entrada*(1-stop%)). Reforzar antes
+    # del stop no es esta decision; para eso esta adjust_position.
+    stop_level = entry_ask * (1 - float(stop_pct) / 100.0)
+    if cur_bid > stop_level:
+        return {"error": f"el stop no esta tocado (bid {cur_bid:.2f} > umbral "
+                         f"{stop_level:.2f}); reforzar solo en el toque del stop"}
+
+    # Gate 4: riesgo total acotado. La prima total del trade (lo ya pagado + el
+    # refuerzo) no puede superar el maximo por operacion. Obliga a que la entrada
+    # inicial fuese un 'starter' pequeno; si no, no hay sitio para reforzar.
+    n = a.contracts or 1
+    add_cost = round(add_ask * 100 * n, 2)
+    orig_cost = float(meta.get("cost") or entry_ask * 100 * n)
+    cfg = getattr(settings, "POWERTRADEAI", {})
+    max_risk = float(cfg.get("PAPER_ACCOUNT", 10000)) * \
+        float(cfg.get("RISK_PCT_PER_TRADE", 2.0)) / 100.0
+    if orig_cost + add_cost > max_risk:
+        return {"error": f"reforzar (+${add_cost:.0f}) llevaria el riesgo del trade "
+                         f"a ${orig_cost + add_cost:.0f}, por encima del maximo "
+                         f"${max_risk:.0f}. Entra con menos contratos si quieres "
+                         f"dejar sitio para reforzar."}
+
+    # --- Refuerzo: promediar prima, duplicar contratos ---
+    # Con el mismo nº de contratos por tramo, la prima mezclada es la media; el
+    # resolver calcula el P&L combinado correcto con (entry_ask mezclado, 2n).
+    blended = round((entry_ask + add_ask) / 2.0, 4)
+    add_bid = round(cur_bid, 4)
+    meta.setdefault("original_entry_ask", entry_ask)
+    meta.setdefault("original_contracts", n)
+    meta["reinforced"] = True
+    meta["cost"] = round(orig_cost + add_cost, 2)
+    meta.setdefault("reinforcements", []).append({
+        "at": _now(ctx).astimezone(NY).strftime("%H:%M"),
+        "confirmation": confirmation.strip()[:200],
+        "add_ask": round(add_ask, 4), "add_contracts": n, "add_cost": add_cost,
+        "bid_at_reinforce": add_bid, "blended_entry_ask": blended,
+    })
+    a.entry_ask = blended
+    a.entry_premium = blended
+    a.contracts = n * 2
+    a.meta = meta
+    a.save(update_fields=["entry_ask", "entry_premium", "contracts", "meta",
+                          "updated_at"])
+    return {"alert_id": alert_id, "reinforced": True,
+            "add_contracts": n, "total_contracts": n * 2,
+            "add_premium": round(add_ask, 4), "blended_entry_premium": blended,
+            "add_cost": add_cost, "trade_risk_total": meta["cost"],
+            "nota": "El stop ahora se mide sobre la prima media; si vuelve a "
+                    "tocarlo, cierra (no hay segundo refuerzo)."}
+
+
+@skill(
     "get_my_track_record",
     "Tu expediente real: como te fue con las alertas que YA lanzaste y se "
     "cerraron (acierto direccional del subyacente). Consultalo para ser honesto "

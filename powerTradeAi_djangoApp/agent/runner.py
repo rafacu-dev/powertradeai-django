@@ -32,7 +32,12 @@ Metodo en cada corrida:
 hay, gestionalas: si la tesis se rompio o ya lograste el objetivo, cierra \
 (close_position); si va a favor, considera mover el stop a break-even o subir \
 el objetivo (adjust_position); si sigue valida, mantenla. Gestionar lo abierto \
-va antes que buscar nuevas entradas.
+va antes que buscar nuevas entradas. Cuando una posicion TOQUE su stop, la \
+respuesta normal es CERRAR: en el backtest, reforzar en el stop perdio el 94% \
+de las veces. Solo existe reinforce_position para el caso raro en que la tesis \
+sigue viva con una CONFIRMACION nueva y objetiva (cierre 15m mas alla del nivel, \
+rechazo de VWAP, diagonal que aguanta) — nunca por 'sigo creyendo', y solo si \
+entraste con un starter pequeno que deja sitio al riesgo. En la duda, cierra.
 1. Recupera tu contexto: get_prior_analysis, get_notes y get_my_track_record \
 del activo. No empieces de cero; continua tu razonamiento anterior y se honesto \
 con como te ha ido (si tus PUTs van mal, se mas exigente con ellos).
