@@ -82,6 +82,7 @@ def _mode(ctx) -> str:
 def _price_asof(provider, symbol, as_of):
     """Ultimo precio conocido en/antes de ``as_of`` (cierre de la vela de 1m).
     Antes de la apertura, el ultimo cierre diario previo. None si no hay dato."""
+    import pandas as pd
     from datetime import timedelta
     day = as_of.astimezone(NY).date()
     try:
@@ -89,7 +90,9 @@ def _price_asof(provider, symbol, as_of):
     except Exception:
         bars = None
     if bars is not None and not bars.empty:
-        upto = bars[bars.index <= as_of]
+        # Excluir la vela de 1m en curso: su cierre esta 1 min en el futuro.
+        cutoff = pd.Timestamp(as_of) - pd.Timedelta(minutes=1)
+        upto = bars[bars.index <= cutoff]
         if not upto.empty:
             return float(upto.iloc[-1]["close"])
     try:
@@ -113,12 +116,30 @@ def _spot(ctx, provider, symbol):
     return px
 
 
+_TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
+               "1d": 1440, "1w": 10080}
+
+
+def _tf_minutes(tf: str) -> int:
+    return _TF_MINUTES.get(tf, 1)
+
+
 def _bars_upto(ctx, provider, symbol, start, end, tf):
-    """Velas hasta ``end``, truncadas al reloj causal si estamos entrenando."""
+    """Velas cuyo CIERRE ya ocurrio en el reloj causal (entrenamiento).
+
+    El indice de una vela es su INICIO. Una vela de 15m que empieza a las 13:00
+    no cierra hasta las 13:15, asi que a las 13:05 aun NO es observable: mirar su
+    OHLC seria leer 10 min del futuro. Se exige ``inicio + timeframe <= as_of``,
+    la misma condicion que ``ScanContext.causal_bars`` del motor de reglas. En
+    vivo (``as_of`` None) no se toca: el provider ya da la vela en curso real.
+    """
+    import pandas as pd
+
     df = provider.bars(symbol, start, end, tf)
     as_of = ctx.get("as_of")
     if as_of is not None and not df.empty:
-        df = df[df.index <= as_of]
+        cutoff = pd.Timestamp(as_of) - pd.Timedelta(minutes=_tf_minutes(tf))
+        df = df[df.index <= cutoff]
     return df
 
 
