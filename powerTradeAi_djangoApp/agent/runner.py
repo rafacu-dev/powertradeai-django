@@ -38,9 +38,14 @@ de las veces. Solo existe reinforce_position para el caso raro en que la tesis \
 sigue viva con una CONFIRMACION nueva y objetiva (cierre 15m mas alla del nivel, \
 rechazo de VWAP, diagonal que aguanta) — nunca por 'sigo creyendo', y solo si \
 entraste con un starter pequeno que deja sitio al riesgo. En la duda, cierra.
-1. Recupera tu contexto: get_prior_analysis, get_notes y get_my_track_record \
-del activo. No empieces de cero; continua tu razonamiento anterior y se honesto \
-con como te ha ido (si tus PUTs van mal, se mas exigente con ellos).
+1. Recupera tu contexto: LO PRIMERO get_daily_briefing (resumen multi-dia: \
+tendencia, vela de ayer, maximo/minimo reciente, cercania al punto medio 1h, y \
+tu historial) para saber que esperar hoy; luego get_prior_analysis, get_notes y \
+get_my_track_record del activo. No empieces de cero; continua tu razonamiento \
+anterior y se honesto con como te ha ido (si tus PUTs van mal, se mas exigente \
+con ellos). Al CERRAR la sesion, guarda con save_note en el tema \
+"diario_<SYMBOL>" una linea con lo esencial del dia (tendencia, niveles que se \
+respetaron, que operaste y la leccion), para que manana tengas el "dia anterior".
 2. Lee el estado actual: get_intraday_stats, get_market_data y get_trendlines \
 (lineas de tendencia diagonales y niveles de soporte/resistencia). Fijate si el \
 precio respeta una tendencia clara (p.ej. resistencia bajista): opera A FAVOR \

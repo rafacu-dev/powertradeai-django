@@ -844,6 +844,132 @@ def get_trendlines(ctx, symbol: str, timeframe: str = "1h",
 
 
 @skill(
+    "get_daily_briefing",
+    "Briefing de PRE-MERCADO: resumen multi-dia para saber que esperar hoy. "
+    "Tendencia (velas seguidas del mismo lado, MA20/50 diarias), la vela de AYER "
+    "(color, fuerza, donde cerro), maximo/minimo de 3 y 10 dias y donde esta el "
+    "precio, cercania al punto medio de Bollinger en 1h (pista de rebote o cambio "
+    "de tendencia), RSI diario, y TU historial (dias operados, win rate, P&L, "
+    "ultima leccion). Llamalo LO PRIMERO cada dia para tener contexto.",
+    {"type": "object", "properties": {"symbol": {"type": "string"}},
+     "required": ["symbol"]},
+)
+def get_daily_briefing(ctx, symbol: str):
+    import pandas as pd
+
+    from ..models import Alert, AgentNote
+    provider = _provider()
+    sym = symbol.upper()
+    end = _now(ctx).date()
+
+    # --- Diario: SOLO dias ya cerrados (la vela de hoy incluiria el futuro) ---
+    daily = provider.bars(sym, end - timedelta(days=90), end, "1d")
+    if daily.empty:
+        return {"symbol": sym, "error": "sin datos diarios"}
+    d = daily[daily.index.tz_convert(NY).date < end]
+    if len(d) < 5:
+        return {"symbol": sym, "error": "historial diario insuficiente"}
+    o, h, l, c = (d["open"].astype(float), d["high"].astype(float),
+                  d["low"].astype(float), d["close"].astype(float))
+    last_o, last_h, last_l, last_c = (float(o.iloc[-1]), float(h.iloc[-1]),
+                                      float(l.iloc[-1]), float(c.iloc[-1]))
+    prev_c = float(c.iloc[-2])
+
+    # ATR(14) diario para medir "fuerza".
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    atr = float(tr.rolling(14).mean().iloc[-1]) if len(d) >= 15 else float(tr.mean())
+
+    # Vela de AYER (ultima cerrada).
+    rng = last_h - last_l
+    close_pos = (last_c - last_l) / rng if rng > 0 else 0.5
+    tercio = ("tercio alto" if close_pos >= 0.66 else
+              "tercio bajo" if close_pos <= 0.33 else "tercio medio")
+    ret = (last_c - prev_c) / prev_c * 100 if prev_c else 0.0
+    ayer = {"color": "roja" if last_c < last_o else "verde",
+            "rango_pct": round(rng / last_o * 100, 2) if last_o else None,
+            "cierre_en": tercio, "cambio_pct": round(ret, 2),
+            "movimiento": "fuerte" if atr and abs(last_c - prev_c) >= atr else "normal"}
+
+    # Tendencia: velas seguidas del mismo color + sesgo de medias.
+    streak = 1
+    for i in range(len(d) - 1, 0, -1):
+        if (float(c.iloc[i]) < float(o.iloc[i])) == (float(c.iloc[i - 1]) < float(o.iloc[i - 1])):
+            streak += 1
+        else:
+            break
+    ma20 = round(float(c.iloc[-20:].mean()), 2) if len(d) >= 20 else None
+    ma50 = round(float(c.iloc[-50:].mean()), 2) if len(d) >= 50 else None
+    sesgo = ("alcista" if ma20 and ma50 and ma20 > ma50 else
+             "bajista" if ma20 and ma50 and ma20 < ma50 else "lateral")
+    tendencia = {"sesgo_ma": sesgo, "ma20_d": ma20, "ma50_d": ma50,
+                 "velas_seguidas": streak,
+                 "color_racha": "rojas" if last_c < last_o else "verdes"}
+
+    # Rango reciente.
+    hi3, lo3 = float(h.iloc[-3:].max()), float(l.iloc[-3:].min())
+    hi10, lo10 = float(h.iloc[-10:].max()), float(l.iloc[-10:].min())
+    try:
+        price = _spot(ctx, provider, sym)
+    except Exception:
+        price = last_c
+    rango = {"max_3d": round(hi3, 2), "min_3d": round(lo3, 2),
+             "max_10d": round(hi10, 2), "min_10d": round(lo10, 2),
+             "pos_en_rango_10d_pct": round((price - lo10) / (hi10 - lo10) * 100, 1)
+             if hi10 > lo10 else None}
+
+    # Efecto iman: cercania al punto medio de Bollinger en 1h (causal).
+    iman = None
+    h1 = _bars_upto(ctx, provider, sym, end - timedelta(days=15), end, "1h")
+    if not h1.empty and len(h1) >= 20:
+        cc = h1["close"].astype(float)
+        mid = float(cc.iloc[-20:].mean())
+        std = float(cc.iloc[-20:].std(ddof=0))
+        up, dn = mid + 2 * std, mid - 2 * std
+        dist = (price - mid) / mid * 100 if mid else 0.0
+        if abs(dist) <= 0.3:
+            pista = "cerca del punto medio 1h: zona de rebote o cambio de tendencia"
+        elif price > up:
+            pista = "extendido sobre la banda superior 1h: posible reversion a la media"
+        elif price < dn:
+            pista = "extendido bajo la banda inferior 1h: posible rebote a la media"
+        else:
+            pista = "dentro de las bandas 1h, sin extremo"
+        iman = {"punto_medio_1h": round(mid, 2), "dist_pct": round(dist, 2),
+                "zona": ("sobre banda sup" if price > up else
+                         "bajo banda inf" if price < dn else "dentro"),
+                "pista": pista}
+
+    # Tu historial (causal): dias operados, win rate, P&L, ultima leccion.
+    qs = Alert.objects.filter(source=_alert_source(ctx), symbol=sym,
+                              status=Alert.Status.CLOSED)
+    as_of = ctx.get("as_of")
+    if as_of is not None:
+        qs = qs.filter(exit_ts__isnull=False, exit_ts__lte=as_of)
+    closed = list(qs)
+    ncl = len(closed)
+    wins = sum(1 for a in closed if float(a.net_dollars or 0) > 0)
+    nq = AgentNote.objects.filter(mode=_mode(ctx))
+    nq = (nq.filter(as_of__isnull=False, as_of__lte=as_of).order_by("-as_of")
+          if as_of is not None else nq.order_by("-created_at"))
+    last_note = nq.first()
+    historial = {"dias_operados": len({a.session_date for a in closed}),
+                 "operaciones_cerradas": ncl,
+                 "win_rate_pct": round(wins / ncl * 100, 1) if ncl else None,
+                 "pnl_neto": round(sum(float(a.net_dollars or 0) for a in closed), 2),
+                 "ultima_leccion": last_note.note[:200] if last_note else None}
+
+    return {
+        "symbol": sym, "fecha": str(end), "precio": round(price, 2),
+        "tendencia": tendencia, "ayer": ayer, "rango_reciente": rango,
+        "rsi14_diario": _rsi(c, 14),
+        "dist_ma20_d_pct": round((price - ma20) / ma20 * 100, 2) if ma20 else None,
+        "dist_ma50_d_pct": round((price - ma50) / ma50 * 100, 2) if ma50 else None,
+        "efecto_iman_1h": iman, "tu_historial": historial,
+    }
+
+
+@skill(
     "save_note",
     "Guarda una nota en tu cuaderno de day-trader (ideas, patrones, reglas que "
     "quieres recordar), indexada por tema. Persiste entre corridas.",
