@@ -47,8 +47,17 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         from ...agent.autopilot import AgentAutopilot
+        from ...agent.maintenance import close_stale_runs
         from ...data import get_provider
         from ...engine.session import is_market_open, now_ny, seconds_until_open
+
+        # Si el worker anterior murio a mitad de un ciclo, su AgentRun quedo en
+        # RUNNING para siempre. Este es el momento natural de cerrarlas: acabamos
+        # de arrancar, asi que ninguna corrida propia puede estar en vuelo.
+        huerfanas = close_stale_runs()
+        if huerfanas:
+            self.stdout.write(self.style.WARNING(
+                f"Cerradas {huerfanas} corrida(s) colgadas de un arranque previo."))
 
         symbols = [s.strip().upper() for s in options["symbols"].split(",")
                    if s.strip()] or DEFAULT_SYMBOLS
