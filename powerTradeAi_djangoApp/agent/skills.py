@@ -267,6 +267,191 @@ def scan_bollinger(ctx, symbols: list[str]):
     return {"scanned": rows}
 
 
+# ── Internos del indice (que lo mueve por dentro) ───────────────────
+# Los pesos son aproximados y solo sirven para ponderar el voto: el objetivo no
+# es replicar el NAV del ETF sino saber quien empuja mas fuerte.
+
+_SECTOR_PROXIES = {
+    "SOXX": 0.20, "SMH": 0.15, "XLK": 0.20, "IGV": 0.15,
+    "XLY": 0.10, "XLC": 0.10, "FDN": 0.05, "IBB": 0.05,
+}
+_MEGACAPS = {
+    "NVDA": 0.085, "AAPL": 0.080, "MSFT": 0.075, "AMZN": 0.055,
+    "AVGO": 0.050, "GOOGL": 0.050, "META": 0.045, "TSLA": 0.030,
+}
+_SLOPE_MIN = 0.0003   # mismo umbral que la investigacion de regimen
+
+
+def _trend_1h(bars):
+    """(etiqueta, signo, pendiente_bps) de la tendencia 1h: MA20 vs MA40 + pendiente.
+
+    Misma definicion que el backtest de regimen: se exige que la pendiente de la
+    MA20 supere ``_SLOPE_MIN`` para declarar tendencia; si no, es 'plano'.
+    """
+    if bars is None or bars.empty or len(bars) < 45:
+        return "n/d", 0, None
+    closes = bars["close"]
+    maf = closes.rolling(20).mean()
+    mas = closes.rolling(40).mean()
+    if maf.isna().iloc[-1] or mas.isna().iloc[-1] or len(maf.dropna()) < 6:
+        return "n/d", 0, None
+    f, s = float(maf.iloc[-1]), float(mas.iloc[-1])
+    prev = float(maf.iloc[-6])
+    slope = (f - prev) / f if f else 0.0
+    if f > s and slope > _SLOPE_MIN:
+        return "alcista", 1, round(slope * 10000, 1)
+    if f < s and slope < -_SLOPE_MIN:
+        return "bajista", -1, round(slope * 10000, 1)
+    return "plano", 0, round(slope * 10000, 1)
+
+
+@skill(
+    "get_index_internals",
+    "Como se esta moviendo un indice POR DENTRO: la tendencia 1h de los "
+    "componentes/sectores que mas lo empujan (QQQ: semis, software, tech, "
+    "consumo...), cuantos estan alineados con el indice (breadth), si el "
+    "movimiento es 'en bloque' o disperso, y quien lidera o rezaga. Sirve para "
+    "juzgar la CALIDAD del regimen antes de operar el indice: NO es una senal "
+    "de entrada. Usar en QQQ (tambien SPY) junto a la senal de precio.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string",
+                       "description": "Indice a analizar: QQQ o SPY."},
+            "group": {"type": "string", "enum": ["sectores", "megacaps", "ambos"],
+                      "description": "Que componentes usar. Por defecto sectores "
+                                     "(ETFs), que dan una lectura mas limpia."},
+        },
+        "required": ["symbol"],
+    },
+)
+def get_index_internals(ctx, symbol: str, group: str = "sectores"):
+    """Breadth + dispersion + liderazgo de los componentes, causal.
+
+    Todo se calcula con velas ya cerradas (``_bars_upto``), asi que en
+    entrenamiento no puede ver el futuro. La dispersion se compara contra su
+    propia historia PREVIA (percentil), no contra un umbral fijo: su escala
+    depende del regimen de volatilidad.
+    """
+    import pandas as pd
+
+    provider = _provider()
+    sym = symbol.upper()
+    end = _now(ctx).date()
+    comps: dict[str, float] = {}
+    if group in ("sectores", "ambos"):
+        comps.update(_SECTOR_PROXIES)
+    if group in ("megacaps", "ambos"):
+        comps.update(_MEGACAPS)
+    if not comps:
+        comps = dict(_SECTOR_PROXIES)
+
+    idx_h1 = _bars_upto(ctx, provider, sym, end - timedelta(days=45), end, "1h")
+    idx_label, idx_sign, idx_slope = _trend_1h(idx_h1)
+    if idx_sign == 0:
+        nota = ("El indice NO tiene tendencia 1h definida: el breadth no es "
+                "interpretable como confirmacion. Trata el regimen como neutro.")
+    else:
+        nota = None
+
+    idx_m15 = _bars_upto(ctx, provider, sym, end - timedelta(days=20), end, "15m")
+
+    rows, rets, wsum, waligned, aligned = [], {}, 0.0, 0.0, 0
+    for comp, weight in comps.items():
+        try:
+            h1 = _bars_upto(ctx, provider, comp, end - timedelta(days=45), end, "1h")
+            m15 = _bars_upto(ctx, provider, comp, end - timedelta(days=20), end, "15m")
+        except Exception as exc:
+            rows.append({"symbol": comp, "error": str(exc)})
+            continue
+        label, sign, slope = _trend_1h(h1)
+        if label == "n/d":
+            rows.append({"symbol": comp, "error": "sin datos"})
+            continue
+        is_al = bool(idx_sign != 0 and sign == idx_sign)
+        aligned += int(is_al)
+        wsum += weight
+        waligned += weight * (1.0 if is_al else 0.0)
+        r15 = None
+        if not m15.empty and len(m15) >= 2:
+            c = m15["close"]
+            r15 = round(float((c.iloc[-1] / c.iloc[-2] - 1) * 100), 3)
+            rets[comp] = c.pct_change()
+        rows.append({
+            "symbol": comp, "peso_aprox": weight, "trend_1h": label,
+            "alineado": is_al, "pendiente_bps": slope, "ret_15m_pct": r15,
+        })
+
+    total = sum(1 for r in rows if "error" not in r)
+    breadth = round(aligned / total, 3) if total else None
+    strength = round(waligned / wsum, 3) if wsum else None
+
+    # Dispersion transversal: std de los retornos 15m entre componentes, y su
+    # percentil frente a la historia previa (excluida la barra actual).
+    disp_val = disp_pct = None
+    if rets and not idx_m15.empty:
+        R = pd.DataFrame(rets).reindex(idx_m15.index).ffill(limit=2)
+        ser = R.std(axis=1).dropna()
+        if len(ser) >= 50:
+            disp_val = float(ser.iloc[-1])
+            hist = ser.iloc[:-1]
+            disp_pct = int(round(float((hist < disp_val).mean()) * 100))
+
+    disp_label = None
+    if disp_pct is not None:
+        disp_label = "baja" if disp_pct <= 33 else "alta" if disp_pct >= 67 else "media"
+
+    regimen = "indefinido"
+    if breadth is not None and disp_label and idx_sign != 0:
+        alto = breadth >= 0.75
+        if alto and disp_label == "baja":
+            regimen = f"bloque_{idx_label}"
+        elif alto and disp_label == "alta":
+            regimen = f"fuerte_pero_disperso_{idx_label}"
+        elif alto:
+            regimen = f"alineado_{idx_label}"
+        elif disp_label == "alta":
+            regimen = "fragmentado"
+        else:
+            regimen = "mixto"
+
+    ok = [r for r in rows if "error" not in r and r.get("pendiente_bps") is not None]
+    lideres = sorted(ok, key=lambda r: -abs(r["pendiente_bps"]))[:3]
+    rezagados = [r for r in ok if not r["alineado"]][:3]
+
+    return {
+        "symbol": sym,
+        "as_of": _now(ctx).astimezone(NY).strftime("%Y-%m-%d %H:%M"),
+        "grupo": group,
+        "trend_1h_indice": idx_label,
+        "pendiente_indice_bps": idx_slope,
+        "breadth": {"alineados": aligned, "total": total, "fraccion": breadth},
+        "alineacion_ponderada": strength,
+        "dispersion": {"valor": round(disp_val, 6) if disp_val is not None else None,
+                       "percentil_historico": disp_pct, "etiqueta": disp_label},
+        "regimen": regimen,
+        "componentes": rows,
+        "lideres_por_fuerza": [r["symbol"] for r in lideres],
+        "no_confirman": [r["symbol"] for r in rezagados],
+        "nota": nota,
+        "como_interpretar": {
+            "breadth_alto": "6/8+ alineados: el movimiento siguiente tiende a ser "
+                            "~44% mas amplio y la direccion acierta ~54% (vs 53% "
+                            "base). Es contexto, no ventaja suficiente por si sola.",
+            "dispersion_baja": "movimiento 'en bloque': la mejor asimetria a favor "
+                               "de la tendencia, pero recorridos CHICOS.",
+            "dispersion_alta": "movimiento ~2x mas grande PERO la tendencia falla: "
+                               "acierto ~50% y el recorrido en contra supera al "
+                               "favorable. NO es regimen para seguir tendencia.",
+            "limite_medido": "Ninguna combinacion de breadth/dispersion resulto "
+                             "rentable como regla mecanica comprando opciones de "
+                             "QQQ intradia (5 backtests, -$25 a -$75 por operacion). "
+                             "Usa esto para DESCARTAR entradas y dimensionar, no "
+                             "para justificar una entrada.",
+        },
+    }
+
+
 def _strike_step(spot: float) -> float:
     return 5.0 if spot >= 200 else 2.5 if spot >= 50 else 1.0
 

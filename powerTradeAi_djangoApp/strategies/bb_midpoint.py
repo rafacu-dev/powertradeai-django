@@ -200,10 +200,15 @@ def valid_target_geometry(direction: str, entry: float, target: float,
 
 # --- Regla --------------------------------------------------------------
 
+def _utc(ts):
+    t = pd.Timestamp(ts)
+    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+
 class BBMidpointBase(BaseStrategy):
     direction = "CALL"
     confirmation = "body"
-    rule_version = "bb1h_closed_signal_first_quote_v4"
+    rule_version = "bb1h_closed_signal_midpoint_invalid_v5"
     default_params = {
         "hold_minutes": MAX_HOLD_MINUTES,
         "flatten_at": "15:55",
@@ -320,13 +325,50 @@ class BBMidpointBase(BaseStrategy):
         return None, None, None, None
 
     def check_exit(self, ctx: ScanContext, alert) -> ExitDecision:
-        target = alert.meta.get("target_underlying")
-        stop = alert.meta.get("stop_underlying")
+        meta = alert.meta or {}
+        target = meta.get("target_underlying")
+        stop = meta.get("stop_underlying")
         if target is None or stop is None or alert.entry_ts is None:
             return ExitDecision(should_exit=False)
-        return target_stop_exit(
+        # Salida por target (banda opuesta) / stop (medio +/-40 bps) en 1m.
+        ts_exit = target_stop_exit(
             ctx.causal_bars(1), alert.direction,
             float(target), float(stop), alert.entry_ts)
+        # INVALIDACION ESTRUCTURAL: una vela 15m CIERRA de vuelta al otro lado
+        # del punto medio (contra la posicion) -> la tesis (rechazo/rebote en el
+        # medio) se rompio. Se corta YA, sin esperar al nivel del stop 40 bps mas
+        # alla: cuando el precio "rompe el medio y sigue de largo", el trade ya
+        # esta muerto. Gana el evento que ocurra ANTES.
+        inv = self._midpoint_invalidation(ctx, alert, meta.get("bb_mid"))
+        fired = [d for d in (ts_exit, inv) if d.should_exit]
+        if not fired:
+            return ExitDecision(should_exit=False)
+        return min(fired, key=lambda d: _utc(d.at) if d.at else _utc(ctx.now))
+
+    def _midpoint_invalidation(self, ctx: ScanContext, alert, mid) -> ExitDecision:
+        """Cierra si una vela 15m ya cerrada reclama el punto medio contra la
+        posicion (PUT: cierra por encima del medio; CALL: por debajo), con el
+        mismo margen de ruptura que exige la entrada (close_break_bps)."""
+        if mid is None:
+            return ExitDecision(should_exit=False)
+        try:
+            bars15 = ctx.resample("15m")
+        except Exception:
+            return ExitDecision(should_exit=False)
+        if bars15.empty:
+            return ExitDecision(should_exit=False)
+        after = bars15[bars15.index >= _utc(alert.entry_ts)]
+        mid = float(mid)
+        tol = PARAMS.close_break_bps / 10000.0
+        for ts, bar in after.iterrows():
+            close = float(bar["close"])
+            reclaimed = (close > mid * (1 + tol) if alert.direction == "PUT"
+                         else close < mid * (1 - tol))
+            if reclaimed:
+                return ExitDecision(
+                    should_exit=True, reason="midpoint_reclaim",
+                    at=(ts + pd.Timedelta(minutes=15)).to_pydatetime())
+        return ExitDecision(should_exit=False)
 
 
 # --- Las cuatro reglas no-TimesFM ---------------------------------------
