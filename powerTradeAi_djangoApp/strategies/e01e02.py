@@ -34,17 +34,40 @@ from .base import NY, BaseStrategy, ExitDecision, ScanContext, Signal, register
 BB_PERIODO, BB_K = 20, 2.0
 
 # --- calibracion externa (pendientes del material) ---
-VENTANA_TRAMO = 26          # velas 15m del tramo para trazar la linea
-TOLERANCIA_CONTACTO_PCT = 0.15
-CONTACTOS_MINIMOS = 2       # unico valor con respaldo academico
-PENDIENTE_LATERAL_BPS = 5.0
+# Las magnitudes se expresan EN RANGOS DE VELA DEL PROPIO SIMBOLO, no en % fijo.
+# Motivo: el rango tipico de 15m va de 0.293% (AAPL) a 0.480% (TSLA) y el gap
+# tipico de 0.424% a 0.898%. Un 0.15% fijo vale 0.31 rangos en TSLA y 0.51 en
+# AAPL: seria un 65% mas permisivo en AAPL sin haberlo decidido. Ademas
+# confundiria simbolo con calibracion, y entonces un ranking de rentabilidad
+# entre simbolos no significaria nada. La academia lo pide explicitamente:
+# "conocer la liquidez, el spread normal y el comportamiento propio del
+# instrumento".
+VENTANA_TRAMO = 26           # velas 15m del tramo para trazar la linea
+TOLERANCIA_CONTACTO_RANGOS = 0.42   # antes 0.15% fijo (= 0.42 rangos de media)
+CONTACTOS_MINIMOS = 2        # unico valor con respaldo academico
+PENDIENTE_LATERAL_RANGOS = 0.14     # antes 5 bps fijos (= 0.14 rangos de media)
 BARRAS_CONTEXTO = 8
-GAP_MINIMO_PCT = 0.0        # sin minimo publicado
+GAP_MINIMO_RANGOS = 0.0      # sin minimo publicado
 GIRO_MEDIO_MODO = "desaceleracion"   # o "estricto"; ver docstring de _giro
 
 
 def _hora(texto: str):
     return datetime.strptime(texto, "%H:%M").time()
+
+
+def _escala(barras: pd.DataFrame) -> float | None:
+    """Rango tipico de una vela de 15m del simbolo, en fraccion del precio.
+
+    Es la unidad con la que se miden tolerancia, lateralidad y gap. Se calcula
+    con el historial que termina AYER, asi que no lee la sesion viva.
+    """
+    if barras is None or len(barras) < 20:
+        return None
+    r = ((barras["high"] - barras["low"]) / barras["close"]).to_numpy(float)
+    r = r[np.isfinite(r) & (r > 0)]
+    if len(r) < 20:
+        return None
+    return float(np.median(r))
 
 
 def _bollinger(cierres: np.ndarray):
@@ -55,11 +78,13 @@ def _bollinger(cierres: np.ndarray):
     return mid - BB_K * sd, mid, mid + BB_K * sd
 
 
-def _linea_max_contactos(barras: pd.DataFrame, direccion: str):
+def _linea_max_contactos(barras: pd.DataFrame, direccion: str, tol_frac: float):
     """Linea con mas contactos sobre el tramo vigente. CALIBRACION EXTERNA.
 
     La fuente solo fija "minimo dos contactos, cuerpo o mecha, penetraciones
     leves". Generacion de candidatos y desempate son decisiones de software.
+
+    ``tol_frac`` viene ya escalado por la volatilidad del simbolo.
     """
     seg = barras.tail(VENTANA_TRAMO)
     if len(seg) < 4:
@@ -73,7 +98,7 @@ def _linea_max_contactos(barras: pd.DataFrame, direccion: str):
             if (direccion == "CALL" and m >= 0) or (direccion == "PUT" and m <= 0):
                 continue
             linea = m * x + (y[i] - m * i)
-            tol = np.abs(y) * TOLERANCIA_CONTACTO_PCT / 100.0
+            tol = np.abs(y) * tol_frac
             fuera = (y > linea + tol) if direccion == "CALL" else (y < linea - tol)
             if np.any(fuera):
                 continue
@@ -148,6 +173,14 @@ class E01E02AperturaBase(BaseStrategy):
             return None
         cierres = h["close"].to_numpy(float)
 
+        # unidad propia del simbolo: rango tipico de su vela de 15m
+        escala = _escala(h)
+        if escala is None:
+            return None
+        tol_frac = TOLERANCIA_CONTACTO_RANGOS * escala
+        lateral_bps = PENDIENTE_LATERAL_RANGOS * escala * 10000
+        gap_min_pct = GAP_MINIMO_RANGOS * escala * 100
+
         bb_prev = _bollinger(cierres)
         bb_now = _bollinger(np.append(cierres, formando["close"]))
         if bb_prev is None or bb_now is None:
@@ -162,7 +195,7 @@ class E01E02AperturaBase(BaseStrategy):
         gap = apertura - cierre_ant
         if (d == "CALL" and gap <= 0) or (d == "PUT" and gap >= 0):
             return None
-        if abs(gap) / cierre_ant * 100 < GAP_MINIMO_PCT:
+        if abs(gap) / cierre_ant * 100 < gap_min_pct:
             return None
 
         # 2. CONTEXTO PREVIO contrario o lateral (direccion del punto medio)
@@ -174,14 +207,14 @@ class E01E02AperturaBase(BaseStrategy):
         if len(mids) < 2:
             return None
         pend_bps = (mids[-1] - mids[0]) / mids[0] * 10000
-        lateral = abs(pend_bps) < PENDIENTE_LATERAL_BPS
+        lateral = abs(pend_bps) < lateral_bps
         if d == "CALL" and not (pend_bps < 0 or lateral):
             return None
         if d == "PUT" and not (pend_bps > 0 or lateral):
             return None
 
         # 3. LINEA DE TENDENCIA rota por el gap
-        ln = _linea_max_contactos(h, d)
+        ln = _linea_max_contactos(h, d, tol_frac)
         if ln is None:
             return None
         nivel = ln["nivel_siguiente"]; nivel_ant = ln["nivel_ultimo"]
@@ -218,6 +251,8 @@ class E01E02AperturaBase(BaseStrategy):
                 "expansion_pct": round(((up_n - lo_n) / (up_p - lo_p) - 1) * 100, 3),
                 "contexto_pend_bps": round(pend_bps, 2),
                 "contexto_lateral": lateral,
+                "escala_rango15m_pct": round(escala * 100, 4),
+                "umbral_lateral_bps": round(lateral_bps, 2),
                 "target_premium_pct": self.params["target_premium_pct"],
                 "stop_premium_pct": self.params["stop_premium_pct"],
             },
@@ -287,7 +322,7 @@ def _crear(sym: str, direccion: str):
             "name": f"{sym} {eid} {nombre} Bollinger 15m (apertura)",
             "symbol": sym,
             "direction": direccion,
-            "rule_version": "e01e02_opening_gap_forming15m_v2",
+            "rule_version": "e01e02_opening_gap_forming15m_v3",
         }))
 
 

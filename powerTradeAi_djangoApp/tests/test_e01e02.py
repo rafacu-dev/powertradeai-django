@@ -14,7 +14,7 @@ import pytest
 
 from powerTradeAi_djangoApp.strategies.base import ScanContext
 from powerTradeAi_djangoApp.strategies.e01e02 import (
-    E01E02AperturaBase, _bollinger, _linea_max_contactos)
+    E01E02AperturaBase, _bollinger, _escala, _linea_max_contactos)
 
 NY = ZoneInfo("America/New_York")
 DIA = date(2026, 7, 6)
@@ -165,8 +165,28 @@ def test_el_historial_no_incluye_la_sesion_viva():
 # --- piezas ----------------------------------------------------------------
 
 def test_linea_e01_descendente_min_dos_contactos():
-    ln = _linea_max_contactos(_hist15(), "CALL")
+    h = _hist15()
+    ln = _linea_max_contactos(h, "CALL", 0.42 * _escala(h))
     assert ln is not None and ln["contactos"] >= 2
+
+
+def test_la_escala_es_la_volatilidad_propia_del_simbolo():
+    """Un simbolo mas volatil debe producir una escala mayor: es lo que hace
+    que la misma tolerancia signifique lo mismo en TSLA que en AAPL."""
+    tranquilo = _hist15()
+    idx = tranquilo.index
+    c = tranquilo["close"].to_numpy(float)
+    volatil = pd.DataFrame({"open": c, "high": c * 1.01, "low": c * 0.99,
+                            "close": c, "volume": 1000}, index=idx)
+    assert _escala(volatil) > _escala(tranquilo) * 3
+
+
+def test_la_señal_reporta_la_escala_usada():
+    """Trazabilidad: hay que poder auditar con que umbral se disparo."""
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 103.0, paso=0.05)
+    s = _regla("CALL").evaluate(_ctx(hoy, _hist15()))
+    assert s.meta["escala_rango15m_pct"] > 0
+    assert s.meta["umbral_lateral_bps"] > 0
 
 
 def test_bollinger_se_abre_al_sumar_la_barra_en_formacion():
