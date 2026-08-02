@@ -10,7 +10,7 @@ expuesto ni sobreexpuesto." Tampoco hay un BBWidth publicado.
 
 Por eso este modulo:
   1. Devuelve SIEMPRE los numeros crudos (ancho, expansion, posicion del precio)
-     para que el agente pueda discrepar de la clasificacion.
+     para auditar la clasificacion sin convertirla en regla academica.
   2. Calcula los cortes contra la PROPIA historia del simbolo (percentiles), no
      con un porcentaje fijo. Un 15% de expansion no significa lo mismo en TSLA
      que en AAPL: sus rangos de vela difieren en 1.6x.
@@ -23,7 +23,6 @@ solo encontrara 6 señales donde la academia describe una configuracion frecuent
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 
 BB_PERIODO, BB_K = 20, 2.0
 
@@ -69,8 +68,9 @@ def _posicion(precio: float, lo: float, mid: float, up: float) -> str:
 def evaluar(cierres: np.ndarray, precio_actual: float | None = None) -> dict:
     """Estado de volatilidad a partir de una serie de cierres YA CERRADOS.
 
-    ``precio_actual`` permite pasar el precio observado ahora (por ejemplo el de
-    una vela en formacion) sin meterlo en el calculo de las bandas.
+    ``precio_actual`` permite clasificar la posicion de otro precio observado.
+    Si una barra en formacion debe afectar las bandas, el caller agrega antes su
+    cierre parcial a ``cierres`` de forma explicita.
     """
     c = np.asarray(cierres, dtype=float)
     c = c[np.isfinite(c)]
@@ -132,7 +132,7 @@ def evaluar(cierres: np.ndarray, precio_actual: float | None = None) -> dict:
     return {
         "estado": estado,
         "nota": nota,
-        # --- crudo: para que el agente pueda discrepar de la clasificacion ---
+        # --- numeros crudos para auditar la calibracion externa ---
         "ancho_pct": round(ancho * 100, 4),
         "ancho_previo_pct": round(ancho_prev * 100, 4),
         "expansion_pct": round(expansion, 3),

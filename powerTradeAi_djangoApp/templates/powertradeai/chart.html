@@ -276,14 +276,17 @@ header a {
   </div>
 </div>
 
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script
+  src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"
+  integrity="sha384-JZigAjwiaZtkUbA44CWkPaT3iBb/mU5pO6QOANp+OqHd4q+1+7MG1kzp2OOP9ZfP"
+  crossorigin="anonymous"
+  referrerpolicy="no-referrer"></script>
 <script>
 const MA_COLORS = {
-  '9':   '#e67700',
-  '20':  '#1c7ed6',
-  '50':  '#ae3ec9',
+  '20':  '#e0b400',
+  '40':  '#d9485f',
   '100': '#2b8a3e',
-  '200': '#e03131',
+  '200': '#ae3ec9',
 };
 
 const HTF_STYLES = {
@@ -445,12 +448,25 @@ function createChart() {
 
 function buildLegend() {
   const el = document.getElementById('ma-legend');
-  el.innerHTML = '<span style="font-weight:600">15m MAs:</span> ' +
-    Object.entries(MA_COLORS).map(([p, color]) =>
-      `<span><span class="dot" style="background:${color}"></span>MA ${p}</span>`
-    ).join('') +
-    `<span><span class="dot" style="background:${BB_COLOR}"></span>Bollinger 20,2</span>` +
-    `<span><span class="dot" style="background:${VWAP_COLOR}"></span>VWAP</span>`;
+  el.replaceChildren();
+  const title = document.createElement('span');
+  title.style.fontWeight = '600';
+  title.textContent = '15m MAs:';
+  el.appendChild(title);
+
+  const addLegendItem = (color, label) => {
+    const item = document.createElement('span');
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.style.background = color;
+    item.append(dot, document.createTextNode(label));
+    el.appendChild(item);
+  };
+  for (const [period, color] of Object.entries(MA_COLORS)) {
+    addLegendItem(color, `MA ${period}`);
+  }
+  addLegendItem(BB_COLOR, 'Bollinger 20,2');
+  addLegendItem(VWAP_COLOR, 'VWAP');
 }
 
 async function loadData() {
@@ -522,16 +538,23 @@ async function loadData() {
     currentSymbol = symbol;
 
     const htfEl = document.getElementById('htf-legend');
-    let htfHtml = '';
+    htfEl.replaceChildren();
     for (const [tf, lines] of Object.entries(data.htf_lines)) {
       if (!Object.keys(lines).length) continue;
       const style = HTF_STYLES[tf]?.dash ? 'dashed' : 'solid';
-      const entries = Object.entries(lines).map(([p, v]) =>
-        `<span style="color:${MA_COLORS[p]}">MA${p}: ${v}</span>`
-      ).join(' · ');
-      htfHtml += `<span><strong>${HTF_LABELS[tf]}</strong> (${style}): ${entries}</span>`;
+      const group = document.createElement('span');
+      const label = document.createElement('strong');
+      label.textContent = HTF_LABELS[tf] || tf;
+      group.append(label, document.createTextNode(` (${style}): `));
+      Object.entries(lines).forEach(([period, value], index) => {
+        if (index) group.appendChild(document.createTextNode(' · '));
+        const entry = document.createElement('span');
+        entry.style.color = MA_COLORS[period] || '#888';
+        entry.textContent = `MA${period}: ${value}`;
+        group.appendChild(entry);
+      });
+      htfEl.appendChild(group);
     }
-    htfEl.innerHTML = htfHtml;
     document.getElementById('last-update').textContent =
       'Actualizado ' + new Date().toLocaleTimeString();
   } catch (err) {

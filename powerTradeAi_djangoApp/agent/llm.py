@@ -23,6 +23,8 @@ DEFAULTS = {
     "API_KEY": None,
     "TEMPERATURE": 0.3,
     "MAX_TOKENS": 2048,
+    "TIMEOUT_SECONDS": 45,
+    "MAX_RETRIES": 1,
 }
 
 
@@ -50,7 +52,12 @@ def _client(cfg: dict):
         raise LLMError(
             "No hay API key del LLM. Configura POWERTRADEAI['AGENT_LLM']"
             "['API_KEY'] (p.ej. desde DEEPSEEK_API_KEY).")
-    return OpenAI(api_key=cfg["API_KEY"], base_url=cfg["BASE_URL"])
+    return OpenAI(
+        api_key=cfg["API_KEY"],
+        base_url=cfg["BASE_URL"],
+        timeout=float(cfg["TIMEOUT_SECONDS"]),
+        max_retries=int(cfg["MAX_RETRIES"]),
+    )
 
 
 def chat(messages: list[dict], tools: list[dict] | None = None):

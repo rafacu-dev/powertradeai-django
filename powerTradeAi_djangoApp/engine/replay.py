@@ -22,9 +22,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pandas as pd
+from django.db import transaction
+from django.utils import timezone
 
 from ..data import get_provider
-from ..models import Alert, Strategy
+from ..models import Alert, ReplayRun, Strategy
 from ..strategies import ScanContext, get_strategy_class
 from .session import NY, is_trading_day, session_close
 
@@ -114,40 +116,93 @@ def _minutes(day: date):
 
 
 def replay_day(day: date, provider=None, strategy_ids: list[str] | None = None,
-               overwrite: bool = False) -> ReplayResult:
-    """Reconstruye una sesion completa y persiste las alertas como ``replay``."""
+               overwrite: bool = False, persist: bool = True) -> ReplayResult:
+    """Reconstruye una sesion; ``persist=False`` no realiza escrituras."""
     if not is_trading_day(day):
         raise ValueError(f"{day} no es un dia habil de mercado")
 
     provider = _SessionProvider(provider or get_provider(), day)
     result = ReplayResult(day=day)
+    replay_run = None
+    if persist:
+        replay_run = ReplayRun.objects.create(
+            session_date=day,
+            strategy_ids=list(strategy_ids or []),
+            overwrite=overwrite,
+        )
 
     rows = Strategy.objects.filter(enabled=True)
     if strategy_ids:
         rows = rows.filter(strategy_id__in=strategy_ids)
 
-    for row in rows:
+    planned: list[tuple[Strategy, Alert | None]] = []
+    for row in list(rows):
         existing = Alert.objects.filter(
             strategy=row, session_date=day, source=Alert.Source.REPLAY)
-        if existing.exists():
-            if not overwrite:
-                result.skipped.append(
-                    (row.strategy_id, "ya reconstruida (usa --overwrite)"))
-                continue
-            existing.delete()
+        if persist and existing.exists() and not overwrite:
+            result.skipped.append(
+                (row.strategy_id, "ya reconstruida (usa --overwrite)"))
+            continue
 
         try:
+            # Todo el trabajo de red y calculo ocurre sin modificar la base.
             alert = _replay_strategy(row, day, provider)
         except Exception as exc:
             log.exception("replay de %s fallo", row.strategy_id)
             result.errors.append((row.strategy_id, f"{type(exc).__name__}: {exc}"))
             continue
 
+        planned.append((row, alert))
         if alert is None:
             result.skipped.append((row.strategy_id, "sin senal"))
-        else:
-            result.alerts.append(alert)
 
+    if not persist:
+        result.alerts = [alert for _, alert in planned if alert is not None]
+    elif result.errors:
+        # Atomicidad de la sesion: si una regla falla, ninguna reconstruccion
+        # nueva se guarda y cualquier version anterior permanece intacta.
+        result.skipped.extend(
+            (row.strategy_id, "no persistida: fallo atomico de la sesion")
+            for row, alert in planned if alert is not None
+        )
+    else:
+        persisted: list[Alert] = []
+        try:
+            with transaction.atomic():
+                for row, alert in planned:
+                    current = Alert.objects.select_for_update().filter(
+                        strategy=row,
+                        session_date=day,
+                        source=Alert.Source.REPLAY,
+                    )
+                    if current.exists() and not overwrite:
+                        result.skipped.append(
+                            (row.strategy_id,
+                             "ya reconstruida por otra corrida"))
+                        continue
+                    if overwrite:
+                        current.delete()
+                    if alert is not None:
+                        alert.save(force_insert=True)
+                        persisted.append(alert)
+        except Exception as exc:
+            log.exception("fallo el commit atomico del replay %s", day)
+            result.errors.append((
+                "__commit__", f"{type(exc).__name__}: {exc}"))
+        else:
+            result.alerts = persisted
+
+    if replay_run is not None:
+        replay_run.alerts_created = len(result.alerts)
+        replay_run.errors = [
+            {"strategy_id": strategy_id, "detail": detail}
+            for strategy_id, detail in result.errors
+        ]
+        replay_run.status = (
+            ReplayRun.Status.ERROR if result.errors else ReplayRun.Status.DONE)
+        replay_run.finished_at = timezone.now()
+        replay_run.save(update_fields=[
+            "alerts_created", "errors", "status", "finished_at"])
     return result
 
 
@@ -203,16 +258,24 @@ def _replay_strategy(row: Strategy, day: date, provider) -> Alert | None:
         log.info("%s %s: senal sin contrato utilizable", row.strategy_id, day)
         return None
 
-    entry_ts = signal.signal_ts
-    alert = Alert.objects.create(
+    # ThetaData sirve la primera NBBO posterior a la decision. Ese timestamp es
+    # la ejecucion simulada; anclar la entrada al cierre de señal adelantaria
+    # tanto el fill como el reloj de salida.
+    entry_ts = quote.ts or signal.signal_ts
+    # Objeto en memoria. Persistir antes de resolver dejaba filas ``pending`` si
+    # una quote posterior fallaba y hacia que ``save=false`` escribiera de todos
+    # modos.
+    alert = Alert(
         strategy=row,
         rule_version=row.rule_version,
         symbol=row.symbol,
         session_date=day,
         direction=signal.direction,
+        evaluation_version=(
+            "investep_v2" if signal.meta.get("rama") else "legacy_v1"),
         source=Alert.Source.REPLAY,
         status=Alert.Status.PENDING,
-        signal_ts=entry_ts,
+        signal_ts=signal.signal_ts,
         underlying_at_signal=Decimal(str(signal.underlying)),
         occ_symbol=occ,
         expiration=expiration,
@@ -225,6 +288,11 @@ def _replay_strategy(row: Strategy, day: date, provider) -> Alert | None:
         entry_premium=Decimal(str(quote.ask)),
         scheduled_exit_ts=strategy.scheduled_exit(entry_ts),
         meta={**signal.meta, "replay": True},
+        academy_strategy=(
+            row.strategy_id.split("_")[1]
+            if any(marker in row.strategy_id for marker in ("_E01_", "_E02_"))
+            else ""),
+        strategy_branch=str(signal.meta.get("rama", "")),
     )
 
     # --- 3. Avanzar hasta la salida -------------------------------------
@@ -232,17 +300,39 @@ def _replay_strategy(row: Strategy, day: date, provider) -> Alert | None:
     if exit_at is None:
         alert.status = Alert.Status.EXPIRED
         alert.exit_reason = "sin_salida_observable"
-        alert.save(update_fields=["status", "exit_reason", "updated_at"])
         return alert
 
     exit_quote = provider.option_quote(occ, at=exit_at)
     if exit_quote is None or exit_quote.bid <= 0:
         alert.status = Alert.Status.EXPIRED
         alert.exit_reason = f"{reason}:sin_quote"
-        alert.save(update_fields=["status", "exit_reason", "updated_at"])
         return alert
+    if alert.academy_strategy:
+        from django.conf import settings
 
-    alert.close(exit_premium=exit_quote.bid, exit_ts=exit_at, reason=reason)
+        from ..strategies.gates import validate_quote
+
+        config = getattr(settings, "POWERTRADEAI", {})
+        checked = validate_quote(
+            exit_quote,
+            as_of=exit_at,
+            max_spread_pct=float(config.get("MAX_OPTION_SPREAD_PCT", 5.0)),
+            allow_after_seconds=float(config.get(
+                "MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS", 90)),
+        )
+        if checked["status"] != "VALID":
+            alert.status = Alert.Status.EXPIRED
+            alert.exit_reason = f"{reason}:quote_invalida"
+            alert.meta["exit_quote_validation"] = checked
+            return alert
+
+    alert.exit_premium = Decimal(str(exit_quote.bid))
+    alert.exit_ts = exit_at
+    alert.exit_reason = reason
+    alert.status = Alert.Status.CLOSED
+    pnl = alert.compute_pnl()
+    if pnl is not None:
+        alert.net_dollars, alert.net_pct = pnl
     return alert
 
 

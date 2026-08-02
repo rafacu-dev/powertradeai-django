@@ -112,6 +112,7 @@ class ScanContext:
             return None
         return {
             "start": inicio,
+            "observed_through": parcial.index[-1] + pd.Timedelta(minutes=1),
             "open": float(parcial["open"].iloc[0]),
             "high": float(parcial["high"].max()),
             "low": float(parcial["low"].min()),
@@ -160,7 +161,13 @@ class ScanContext:
         closed = self.causal_bars(1)
         if closed.empty:
             return closed
-        agg = closed.resample(rule, label="left", closed="left").agg({
+        # Las velas intradia de mercado empiezan a :30. Sin este anclaje,
+        # pandas forma la vela 1h 09:00-10:00 con solo 30 minutos de RTH y a
+        # las 10:00 ya parece completa. El offset mantiene 09:30-10:30.
+        agg = closed.resample(
+            rule, label="left", closed="left",
+            origin="start_day", offset="30min",
+        ).agg({
             "open": "first", "high": "max", "low": "min",
             "close": "last", "volume": "sum",
         }).dropna(subset=["close"])

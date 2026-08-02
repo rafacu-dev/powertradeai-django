@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from django.utils import timezone
 from rest_framework import authentication, exceptions
+from rest_framework.permissions import BasePermission
+from rest_framework.throttling import SimpleRateThrottle
 
 from .models import ApiKey
 
@@ -30,7 +32,11 @@ class ApiKeyAuthentication(authentication.BaseAuthentication):
     keyword = HEADER_KEYWORD
 
     def authenticate(self, request):
-        header = authentication.get_authorization_header(request).decode("utf-8")
+        try:
+            header = authentication.get_authorization_header(request).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise exceptions.AuthenticationFailed(
+                "Authorization invalido.") from exc
         if not header:
             return None
         parts = header.split()
@@ -54,3 +60,35 @@ class ApiKeyAuthentication(authentication.BaseAuthentication):
 
     def authenticate_header(self, request) -> str:
         return self.keyword
+
+
+class ApiKeyScopePermission(BasePermission):
+    """Exige el scope declarado por la vista despues de autenticar la clave."""
+
+    message = "La API key no tiene el scope requerido."
+
+    def has_permission(self, request, view):
+        key = getattr(request, "auth", None)
+        if key is None:
+            return False
+        scopes = set(key.scopes or ["read"])
+        required = getattr(view, "required_scope", "read")
+        if isinstance(required, dict):
+            required = required.get(getattr(view, "action", None), "read")
+        return "*" in scopes or required in scopes
+
+
+class ApiKeyRateThrottle(SimpleRateThrottle):
+    scope = "powertradeai_api"
+    rate = "120/min"
+
+    def get_cache_key(self, request, view):
+        key = getattr(request, "auth", None)
+        if key is None:
+            return None
+        return self.cache_format % {"scope": self.scope, "ident": key.pk}
+
+
+class ReplayRateThrottle(ApiKeyRateThrottle):
+    scope = "powertradeai_replay"
+    rate = "2/min"

@@ -17,13 +17,14 @@ Pensado para un Background Worker aparte del scanner de reglas.
 """
 from __future__ import annotations
 
+import logging
 import signal
 import time
 
 from django.core.management.base import BaseCommand
 
-DEFAULT_SYMBOLS = ["NVDA", "AAPL", "MSFT", "AMZN", "META",
-                   "TSLA", "QQQ", "SPY", "DIA"]
+DEFAULT_SYMBOLS = ["TSLA", "SPY", "QQQ"]
+log = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -59,8 +60,14 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 f"Cerradas {huerfanas} corrida(s) colgadas de un arranque previo."))
 
+        from django.conf import settings
+        configured = getattr(settings, "POWERTRADEAI", {}).get(
+            "INVESTEP_WATCHLIST", DEFAULT_SYMBOLS)
+        if isinstance(configured, str):
+            configured = configured.split(",")
+        default_symbols = [str(s).strip().upper() for s in configured if str(s).strip()]
         symbols = [s.strip().upper() for s in options["symbols"].split(",")
-                   if s.strip()] or DEFAULT_SYMBOLS
+                   if s.strip()] or default_symbols
         poll = options["poll"]
         ignore_hours = options["ignore_market_hours"]
 
@@ -85,6 +92,14 @@ class Command(BaseCommand):
 
         while not stopping["now"]:
             if not ignore_hours and not is_market_open():
+                try:
+                    from ...agent.resolver import resolve_agent_alerts
+                    for alert in resolve_agent_alerts(
+                            now=now_ny(), force=True, provider=provider):
+                        self.stdout.write(
+                            f"[{now_ny():%H:%M:%S}] resuelta alerta #{alert.id}")
+                except Exception:
+                    log.exception("fallo el resolver con mercado cerrado")
                 wait = min(seconds_until_open(), 900)
                 self.stdout.write(
                     f"[{now_ny():%H:%M:%S}] mercado cerrado; "
@@ -92,8 +107,20 @@ class Command(BaseCommand):
                 self._sleep(wait, stopping)
                 continue
 
-            for sym, msg in autopilot.tick(provider):
-                self.stdout.write(f"[{now_ny():%H:%M:%S}] {sym} {msg}")
+            # Este worker es dueno tanto de las decisiones generativas como de
+            # resolver sus alertas. El scanner determinista no espera al LLM.
+            try:
+                from ...agent.resolver import resolve_agent_alerts
+                for alert in resolve_agent_alerts(provider=provider):
+                    self.stdout.write(
+                        f"[{now_ny():%H:%M:%S}] resuelta alerta #{alert.id}")
+            except Exception:
+                log.exception("fallo el resolver del agente")
+            try:
+                for sym, msg in autopilot.tick(provider):
+                    self.stdout.write(f"[{now_ny():%H:%M:%S}] {sym} {msg}")
+            except Exception:
+                log.exception("fallo el tick del agente")
             self._sleep(poll, stopping)
 
         self.stdout.write(self.style.SUCCESS("agent_loop terminado."))

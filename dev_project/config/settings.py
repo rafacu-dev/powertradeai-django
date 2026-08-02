@@ -6,6 +6,7 @@ con codigo que funciona exactamente que hay que anadir a un proyecto anfitrion.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -30,6 +31,16 @@ def _load_dotenv(path: Path) -> None:
 
 
 _load_dotenv(REPO_ROOT / ".env")
+
+
+def _json_env(name: str, default):
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{name} debe contener JSON valido") from exc
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-no-usar-en-produccion")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
@@ -65,6 +76,47 @@ POWERTRADEAI = {
         or os.environ.get("APCA_API_SECRET_KEY")
     ),
     "ALPACA_FEED": os.environ.get("ALPACA_FEED", "iex"),
+    "AGENT_LLM": {
+        "BASE_URL": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        "API_KEY": os.environ.get("DEEPSEEK_API_KEY"),
+        "MODEL": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+        "TIMEOUT_SECONDS": int(os.environ.get("DEEPSEEK_TIMEOUT_SECONDS", "45")),
+        "MAX_RETRIES": int(os.environ.get("DEEPSEEK_MAX_RETRIES", "1")),
+    },
+    # Universo operativo versionado. El catalogo conserva mas simbolos para
+    # investigacion, pero seed_strategies solo activa estos tres.
+    "INVESTEP_WATCHLIST": tuple(
+        symbol.strip().upper()
+        for symbol in os.environ.get(
+            "INVESTEP_WATCHLIST", "TSLA,SPY,QQQ").split(",")
+        if symbol.strip()
+    ),
+    "ACCOUNT_SIZE": float(os.environ.get(
+        "ACCOUNT_SIZE", os.environ.get("PAPER_ACCOUNT", "10000"))),
+    "RISK_PCT_PER_TRADE": float(os.environ.get("RISK_PCT_PER_TRADE", "2")),
+    "MAX_CONTRACTS_PER_TRADE": int(
+        os.environ.get("MAX_CONTRACTS_PER_TRADE", "5")),
+    "MAX_DECISION_AGE_SECONDS": int(
+        os.environ.get("MAX_DECISION_AGE_SECONDS", "180")),
+    "MAX_OPTION_SPREAD_PCT": float(
+        os.environ.get("MAX_OPTION_SPREAD_PCT", "5")),
+    "MAX_OPTION_QUOTE_AGE_SECONDS": int(
+        os.environ.get("MAX_OPTION_QUOTE_AGE_SECONDS", "30")),
+    "MAX_OPTION_QUOTE_FUTURE_SKEW_SECONDS": int(
+        os.environ.get("MAX_OPTION_QUOTE_FUTURE_SKEW_SECONDS", "2")),
+    "MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS": int(
+        os.environ.get("MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS", "90")),
+    "REQUIRE_OPTION_QUOTE_TIMESTAMP": True,
+    # Sin cobertura o modelo configurados, el validador devuelve PENDING_* y no
+    # crea alertas. Esto es deliberado: el manual prohibe completar esos vacios.
+    "EVENT_CALENDAR_COVERAGE_FROM": os.environ.get(
+        "EVENT_CALENDAR_COVERAGE_FROM"),
+    "EVENT_CALENDAR_COVERAGE_UNTIL": os.environ.get(
+        "EVENT_CALENDAR_COVERAGE_UNTIL"),
+    "EVENT_CALENDAR": _json_env("EVENT_CALENDAR_JSON", []),
+    "SPOT_PREMIUM_MODELS": _json_env("SPOT_PREMIUM_MODELS_JSON", {}),
+    "MIN_SPOT_PREMIUM_SAMPLES": int(
+        os.environ.get("MIN_SPOT_PREMIUM_SAMPLES", "20")),
 }
 
 REST_FRAMEWORK = {

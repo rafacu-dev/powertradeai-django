@@ -14,10 +14,17 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("name", help="Para que es la clave.")
+        parser.add_argument(
+            "--scope", action="append", dest="scopes",
+            choices=("read", "replay", "transcript", "*"),
+            help="Scope permitido; se puede repetir. Default: read.",
+        )
 
     def handle(self, *args, **options):
-        _, raw = ApiKey.generate(options["name"])
+        scopes = options["scopes"] or ["read"]
+        _, raw = ApiKey.generate(options["name"], scopes=scopes)
         self.stdout.write(self.style.SUCCESS(f"\n  {raw}\n"))
+        self.stdout.write(f"Scopes: {', '.join(scopes)}")
         self.stdout.write(
             "Copiala ahora: solo se guarda su hash, no se puede recuperar.")
         self.stdout.write(f'Uso: curl -H "Authorization: Api-Key {raw}" ...')

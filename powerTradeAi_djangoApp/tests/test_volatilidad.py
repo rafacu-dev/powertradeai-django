@@ -9,12 +9,16 @@ Un detector previo del proyecto exigia "BBWidth > su media de 20" —umbral que 
 existe en el material— y esa invencion fue una de las causas de que encontrara
 6 señales donde la academia describe una configuracion frecuente.
 """
-import numpy as np
-import pytest
+from datetime import datetime
 
+import numpy as np
+import pandas as pd
+
+from powerTradeAi_djangoApp.agent import skills
 from powerTradeAi_djangoApp.agent.volatilidad import (
     BB_PERIODO, PCT_CONFIRMA, PCT_LEVE, evaluar)
 from powerTradeAi_djangoApp.agent.skills import SKILLS
+from powerTradeAi_djangoApp.strategies.base import NY
 
 
 def _serie(n=200, base=100.0, ruido=0.2, semilla=7):
@@ -109,3 +113,30 @@ def test_la_skill_esta_registrada_y_avisa_de_e09_e10():
 def test_la_skill_ofrece_las_tres_temporalidades():
     props = SKILLS["get_estado_volatilidad"].parameters["properties"]
     assert set(props["timeframe"]["enum"]) == {"15m", "1h", "1d"}
+
+
+def test_skill_diaria_no_aplica_filtro_horario_a_velas_de_medianoche(monkeypatch):
+    class DailyProvider:
+        def bars(self, symbol, start, end, timeframe):
+            idx = pd.date_range(
+                "2026-05-01", periods=70, freq="1D", tz="UTC")
+            close = np.linspace(90.0, 110.0, len(idx))
+            return pd.DataFrame({
+                "open": close,
+                "high": close + 1,
+                "low": close - 1,
+                "close": close,
+                "volume": np.full(len(idx), 1000),
+            }, index=idx)
+
+        def latest_price(self, symbol):
+            return 110.0
+
+    monkeypatch.setattr(skills, "_provider", lambda: DailyProvider())
+    result = skills.get_estado_volatilidad(
+        {"as_of": datetime(2026, 7, 15, 12, 0, tzinfo=NY)},
+        "TSLA", timeframe="1d")
+
+    assert "error" not in result
+    assert result["timeframe"] == "1d"
+    assert result["barras_usadas"] >= BB_PERIODO + 2

@@ -1,17 +1,11 @@
 """Resolver de las alertas del agente.
 
-Cada alerta del agente es una prediccion direccional con un horizonte. Cuando el
-horizonte vence, la cerramos con el precio REAL del subyacente en ese instante
-(causal: el precio en el momento del vencimiento, no el ultimo) y guardamos su
-retorno direccional. Asi el agente pasa de opinar a tener un expediente medible.
-
-Se mide el movimiento del SUBYACENTE en %, no el P&L de la opcion: es lo que
-prueba si el agente acierta la DIRECCION, sin el ruido de theta y spread. El
-P&L de opcion real es una segunda capa para mas adelante.
+Las decisiones Investep actuales se resuelven sobre bid/ask de la opcion y
+materializan P&L neto. La ruta sobre subyacente se conserva solo para registros
+legados que no tienen contrato asociado.
 """
 from __future__ import annotations
 
-from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
@@ -67,7 +61,7 @@ def _walk_target_stop(direction, entry, seg, target_pct, stop_pct):
     return None
 
 
-def resolve_agent_alerts(now=None, source=None, force=False) -> list:
+def resolve_agent_alerts(now=None, source=None, force=False, provider=None) -> list:
     """Cierra las alertas del agente por objetivo/stop (lo que ocurra primero)
     o, si no se tocan, al vencer el horizonte. Devuelve las cerradas.
 
@@ -75,6 +69,7 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
     (``agent_train``); ``now`` es el reloj (el as_of en entrenamiento).
     ``force``: liquida TODA posicion abierta al precio de ``now`` aunque su
     horizonte no haya vencido (cierre de sesion)."""
+    from django.conf import settings
     from django.utils import timezone
 
     from ..data import get_provider
@@ -89,7 +84,10 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
     if not pending:
         return []
 
-    provider = get_provider()
+    provider = provider or get_provider()
+    config = getattr(settings, "POWERTRADEAI", {})
+    max_quote_age = int(config.get("MAX_OPTION_QUOTE_AGE_SECONDS", 30))
+    max_spread = float(config.get("MAX_OPTION_SPREAD_PCT", 5.0))
     bars_cache: dict = {}
     closed = []
     for a in pending:
@@ -107,14 +105,26 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
             except Exception:
                 series = None
 
-            outcome = _walk_option_premium(series, entry_ask, target_pct, stop_pct)
+            series = _causal_quote_window(
+                series, start=a.entry_ts, end=window_end)
+
+            quote_spread_gate = (
+                max_spread if a.evaluation_version == "investep_v2" else None)
+            outcome = _walk_option_premium(
+                series, entry_ask, target_pct, stop_pct,
+                max_spread_pct=quote_spread_gate)
             if outcome is None:
                 if now < a.scheduled_exit_ts and not force:
                     continue  # sigue viva
                 # Horizonte o cierre forzado: salir al ultimo bid conocido.
-                exit_bid = _last_bid(series)
+                exit_bid = _last_bid(
+                    series, as_of=window_end,
+                    max_age_seconds=max(max_quote_age, 90),
+                    max_spread_pct=quote_spread_gate)
                 if exit_bid is None:
-                    exit_bid = _option_bid(provider, a.occ_symbol, window_end)
+                    exit_bid = _option_bid(
+                        provider, a.occ_symbol, window_end,
+                        max_spread_pct=max_spread)
                 if exit_bid is None:
                     continue
                 reason = ("cierre_sesion"
@@ -123,23 +133,17 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
             else:
                 reason, exit_bid, exit_ts = outcome
 
-            n = a.contracts or 1
             opt_ret = (exit_bid - entry_ask) / entry_ask * 100
-            net_d = (exit_bid - entry_ask) * 100 * n - float(a.commission) * n
-            a.status = Alert.Status.CLOSED
-            a.exit_ts = exit_ts
-            a.exit_reason = reason
-            a.exit_premium = round(exit_bid, 4)
-            a.net_pct = round(opt_ret, 2)
-            a.net_dollars = round(net_d, 2)
+            a.close(exit_premium=round(exit_bid, 4), exit_ts=exit_ts,
+                    reason=reason)
+            net_d = float(a.net_dollars or 0)
             meta.update({"exit_premium": round(exit_bid, 4),
                          "option_return_pct": round(opt_ret, 2),
                          "net_dollars": round(net_d, 2),
-                         "win": opt_ret > 0, "exit_reason": reason})
+                         "net_return_pct": float(a.net_pct or 0),
+                         "win": net_d > 0, "exit_reason": reason})
             a.meta = meta
-            a.save(update_fields=[
-                "status", "exit_ts", "exit_reason", "exit_premium", "net_pct",
-                "net_dollars", "meta", "updated_at"])
+            a.save(update_fields=["meta", "updated_at"])
             closed.append(a)
             continue
 
@@ -192,7 +196,37 @@ def resolve_agent_alerts(now=None, source=None, force=False) -> list:
     return closed
 
 
-def _walk_option_premium(series, entry_ask, target_pct, stop_pct):
+def _causal_quote_window(series, *, start, end):
+    """Recorta defensivamente lo devuelto por el proveedor al rango pedido."""
+    if series is None or getattr(series, "empty", True):
+        return series
+    import pandas as pd
+
+    try:
+        out = series.copy()
+        index = pd.DatetimeIndex(out.index)
+        index = index.tz_localize("UTC") if index.tz is None else index.tz_convert("UTC")
+        out.index = index
+        lo = pd.Timestamp(start)
+        hi = pd.Timestamp(end)
+        lo = lo.tz_localize(NY) if lo.tzinfo is None else lo
+        hi = hi.tz_localize(NY) if hi.tzinfo is None else hi
+        return out[
+            (out.index >= lo.tz_convert("UTC"))
+            & (out.index <= hi.tz_convert("UTC"))
+        ].sort_index()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _walk_option_premium(
+    series,
+    entry_ask,
+    target_pct,
+    stop_pct,
+    *,
+    max_spread_pct=None,
+):
     """Recorre la serie de primas buscando el primer toque de objetivo o stop
     SOBRE LA PRIMA (bid). Objetivo = subir target_pct%; stop = caer stop_pct%.
     Si ambos en la misma vela, asume el STOP (conservador). Devuelve
@@ -207,6 +241,12 @@ def _walk_option_premium(series, entry_ask, target_pct, stop_pct):
         bid = float(row.get("bid", 0) or 0)
         if bid <= 0:
             continue
+        if max_spread_pct is not None:
+            ask = float(row.get("ask", 0) or 0)
+            if ask <= 0 or ask < bid:
+                continue
+            if (ask - bid) / ask * 100 > float(max_spread_pct):
+                continue
         stop_hit = stp is not None and bid <= stp
         tgt_hit = tgt is not None and bid >= tgt
         if stop_hit:
@@ -216,20 +256,61 @@ def _walk_option_premium(series, entry_ask, target_pct, stop_pct):
     return None
 
 
-def _last_bid(series):
+def _last_bid(
+    series,
+    *,
+    as_of,
+    max_age_seconds,
+    max_spread_pct=None,
+):
     if series is None or getattr(series, "empty", True):
         return None
     valid = series[series["bid"] > 0]
-    return float(valid["bid"].iloc[-1]) if not valid.empty else None
+    if max_spread_pct is not None:
+        if "ask" not in valid:
+            return None
+        valid = valid[
+            (valid["ask"] > 0)
+            & (valid["ask"] >= valid["bid"])
+            & (((valid["ask"] - valid["bid"]) / valid["ask"] * 100)
+               <= float(max_spread_pct))
+        ]
+    if valid.empty:
+        return None
+    import pandas as pd
+
+    quoted = pd.Timestamp(valid.index[-1])
+    observed = pd.Timestamp(as_of)
+    if quoted.tzinfo is None:
+        quoted = quoted.tz_localize(NY)
+    if observed.tzinfo is None:
+        observed = observed.tz_localize(NY)
+    age = (
+        observed.tz_convert("UTC") - quoted.tz_convert("UTC")
+    ).total_seconds()
+    if age < 0 or age > max_age_seconds:
+        return None
+    return float(valid["bid"].iloc[-1])
 
 
-def _option_bid(provider, occ, at):
+def _option_bid(provider, occ, at, *, max_spread_pct):
     """Bid del contrato en ``at`` (lo que cobrarias al vender). None si no hay."""
+    from django.conf import settings
+
+    from ..strategies.gates import validate_quote
+
     try:
         q = provider.option_quote(occ, at=at)
     except Exception:
         return None
-    if q is None:
+    config = getattr(settings, "POWERTRADEAI", {})
+    checked = validate_quote(
+        q,
+        as_of=at,
+        max_spread_pct=max_spread_pct,
+        allow_after_seconds=float(config.get(
+            "MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS", 90)),
+    )
+    if checked["status"] != "VALID":
         return None
-    bid = getattr(q, "bid", None)
-    return float(bid) if bid else None
+    return float(q.bid)

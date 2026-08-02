@@ -28,7 +28,7 @@ def _context(provider, symbol: str, day: date, moment: datetime, cache: dict,
 
     El fallo tambien se cachea y se re-lanza: si el proveedor esta caido, la
     primera regla del simbolo se lleva el error y las demas no repiten la
-    llamada. Sin esto, 14 reglas sobre 3 simbolos disparaban 14 peticiones.
+    llamada. Sin esto, varias reglas sobre el mismo simbolo repiten la peticion.
 
     ``hist_cache`` comparte ademas el HISTORIAL entre las reglas de un mismo
     simbolo. Sin el, cada regla creaba un ScanContext con su cache vacia y
@@ -109,16 +109,22 @@ def dry_run(moment: datetime | None = None, provider=None) -> list[dict]:
     return out
 
 
-def scan_once(moment: datetime | None = None, provider=None) -> ScanRun:
+def scan_once(moment: datetime | None = None, provider=None,
+              history_cache: dict | None = None) -> ScanRun:
     """Una pasada completa: abre lo que dispare, cierra lo que toque."""
     moment = (moment or now_ny()).astimezone(NY)
     day = moment.date()
     provider = provider or get_provider()
     run = ScanRun.objects.create(started_at=timezone.now())
     bars_cache: dict[str, object] = {}
-    hist_cache: dict[str, dict] = {}
+    hist_cache = history_cache if history_cache is not None else {}
 
     try:
+        # Gestionar riesgo va antes de buscar entradas. Un fallo posterior de un
+        # ticker no debe impedir que se cierren posiciones ya abiertas.
+        closed = resolve_pending(moment=moment, provider=provider,
+                                 bars_cache=bars_cache)
+
         rows = list(Strategy.objects.filter(enabled=True))
         # Agrupar por simbolo mantiene el cache de velas util.
         by_symbol = defaultdict(list)
@@ -126,20 +132,25 @@ def scan_once(moment: datetime | None = None, provider=None) -> ScanRun:
             by_symbol[row.symbol].append(row)
 
         created = 0
+        symbol_errors = []
         for symbol, strategy_rows in by_symbol.items():
-            ctx = _context(provider, symbol, day, moment, bars_cache,
-                           hist_cache)
+            try:
+                ctx = _context(provider, symbol, day, moment, bars_cache,
+                               hist_cache)
+            except Exception as exc:
+                log.exception("datos de %s fallaron; continua el resto", symbol)
+                symbol_errors.append(f"{symbol}:{type(exc).__name__}")
+                continue
             for strategy_row in strategy_rows:
                 if _open_alert(strategy_row, ctx):
                     created += 1
-
-        closed = resolve_pending(moment=moment, provider=provider,
-                                 bars_cache=bars_cache)
 
         run.strategies_evaluated = len(rows)
         run.alerts_created = created
         run.alerts_closed = closed
         run.ok = True
+        if symbol_errors:
+            run.error = "errores aislados: " + ", ".join(symbol_errors)
     except Exception as exc:
         log.exception("scan_once fallo")
         run.ok = False
@@ -154,7 +165,8 @@ def _open_alert(strategy_row: Strategy, ctx: ScanContext) -> bool:
     """Evalua una regla y abre la alerta si dispara. True si la creo."""
     # Una regla dispara una vez por sesion: si ya hay alerta, no se reevalua.
     if Alert.objects.filter(
-        strategy=strategy_row, session_date=ctx.session_date
+        strategy=strategy_row, session_date=ctx.session_date,
+        source=Alert.Source.LIVE,
     ).exists():
         return False
 
@@ -167,7 +179,12 @@ def _open_alert(strategy_row: Strategy, ctx: ScanContext) -> bool:
     if signal is None:
         return False
 
-    occ, expiration, strike, quote = strategy.select_contract(ctx, signal)
+    try:
+        occ, expiration, strike, quote = strategy.select_contract(ctx, signal)
+    except Exception:
+        log.exception("regla %s fallo al seleccionar contrato",
+                      strategy_row.strategy_id)
+        return False
     if occ is None:
         log.warning(
             "%s disparo %s pero no hay contrato con quote viva; no se registra",
@@ -188,6 +205,8 @@ def _open_alert(strategy_row: Strategy, ctx: ScanContext) -> bool:
                 symbol=strategy_row.symbol,
                 session_date=ctx.session_date,
                 direction=signal.direction,
+                evaluation_version=(
+                    "investep_v2" if signal.meta.get("rama") else "legacy_v1"),
                 status=Alert.Status.PENDING,
                 signal_ts=signal.signal_ts,
                 underlying_at_signal=Decimal(str(signal.underlying)),
@@ -203,6 +222,12 @@ def _open_alert(strategy_row: Strategy, ctx: ScanContext) -> bool:
                 entry_premium=Decimal(str(quote.ask)),
                 scheduled_exit_ts=strategy.scheduled_exit(entry_ts),
                 meta=signal.meta,
+                academy_strategy=(
+                    strategy_row.strategy_id.split("_")[1]
+                    if any(marker in strategy_row.strategy_id
+                           for marker in ("_E01_", "_E02_"))
+                    else ""),
+                strategy_branch=str(signal.meta.get("rama", "")),
             )
     except IntegrityError:
         # Otra pasada gano la carrera. No es un error.
@@ -222,7 +247,9 @@ def resolve_pending(moment: datetime | None = None, provider=None,
     closed = 0
 
     pending = Alert.objects.filter(
-        status=Alert.Status.PENDING).select_related("strategy")
+        status=Alert.Status.PENDING,
+        source=Alert.Source.LIVE,
+    ).select_related("strategy")
     for alert in pending:
         try:
             if _resolve_one(alert, moment, provider, bars_cache):
@@ -250,7 +277,9 @@ def _resolve_one(alert: Alert, moment: datetime, provider, bars_cache: dict) -> 
     elif moment.date() > alert.session_date or (
         moment.time() >= session_close(alert.session_date)
     ):
-        exit_at, reason = moment, "session_close"
+        exit_at = datetime.combine(
+            alert.session_date, session_close(alert.session_date), tzinfo=NY)
+        reason = "session_close"
 
     if exit_at is None:
         return False
@@ -265,6 +294,24 @@ def _resolve_one(alert: Alert, moment: datetime, provider, bars_cache: dict) -> 
             alert.save(update_fields=["status", "exit_reason", "updated_at"])
             return True
         return False
+    if alert.academy_strategy:
+        from django.conf import settings
+
+        from ..strategies.gates import validate_quote
+
+        config = getattr(settings, "POWERTRADEAI", {})
+        checked = validate_quote(
+            quote,
+            as_of=exit_at,
+            max_spread_pct=float(config.get("MAX_OPTION_SPREAD_PCT", 5.0)),
+            allow_after_seconds=float(config.get(
+                "MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS", 90)),
+        )
+        if checked["status"] != "VALID":
+            log.warning(
+                "quote de salida rechazada para alerta %s: %s",
+                alert.pk, checked.get("blocker"))
+            return False
 
     # Se cobra el BID: misma convencion que el replay causal.
     alert.close(exit_premium=quote.bid, exit_ts=exit_at, reason=reason)

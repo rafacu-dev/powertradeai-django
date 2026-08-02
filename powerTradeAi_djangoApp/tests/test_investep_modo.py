@@ -1,4 +1,4 @@
-"""Modo Investep: el agente solo puede operar las estrategias del manual.
+"""Modo Investep: el agente solo puede operar estrategias mecanizadas.
 
 Lo que se prueba aqui no es el prompt (un modelo puede ignorarlo) sino la PUERTA
 DURA: ``create_alert`` rechaza cualquier alerta sin una estrategia documentada.
@@ -15,8 +15,9 @@ from powerTradeAi_djangoApp.agent.skills import SKILLS
 
 # --- catalogo -------------------------------------------------------------
 
-def test_las_diez_operables_y_las_dos_corregidas():
+def test_las_diez_documentadas_y_las_dos_corregidas():
     assert set(investep.ESTRATEGIAS) == {f"E{i:02d}" for i in range(1, 11)}
+    assert investep.AUTOMATIZADAS == {"E01", "E02"}
     assert set(investep.NO_OPERABLES) == {"E11", "E12"}
 
 
@@ -29,10 +30,17 @@ def test_e11_y_e12_no_son_operables():
         assert "NO es operable" in motivo
 
 
-@pytest.mark.parametrize("codigo", ["E01", "e01", " E05 ", "E10"])
+@pytest.mark.parametrize("codigo", ["E01", "e01", " E02 "])
 def test_acepta_codigos_validos_con_ruido(codigo):
     ok, nombre = investep.es_operable(codigo)
     assert ok is True and nombre
+
+
+@pytest.mark.parametrize("codigo", [f"E{i:02d}" for i in range(3, 11)])
+def test_documentada_sin_validador_no_es_operable(codigo):
+    ok, motivo = investep.es_operable(codigo)
+    assert ok is False
+    assert "NO_DETERMINISTIC_VALIDATOR" in motivo
 
 
 @pytest.mark.parametrize("codigo", ["", None, "E99", "scalping", "mi corazonada"])
@@ -96,6 +104,7 @@ def test_el_prompt_del_agente_incluye_el_bloque():
     p = _system_prompt()
     assert "MODO INVESTEP" in p
     assert "create_alert" in p
+    assert "solo E01/E02" in p
 
 
 def test_el_prompt_no_arrastra_el_manual_entero():
@@ -111,21 +120,76 @@ def test_la_skill_de_consulta_esta_registrada():
     assert "consultar_manual" in SKILLS
 
 
-def test_create_alert_exige_la_estrategia():
-    esquema = SKILLS["create_alert"].parameters["properties"]
-    assert "estrategia" in esquema
+def test_create_alert_exige_una_decision_validada():
+    skill = SKILLS["create_alert"]
+    assert "decision_id" in skill.parameters["properties"]
+    assert "decision_id" in skill.parameters["required"]
+    assert "validate_investep_setup" in SKILLS
 
 
-def test_create_alert_rechaza_sin_estrategia_valida():
+def test_create_alert_rechaza_el_contrato_legado():
     from powerTradeAi_djangoApp.agent.skills import create_alert
     r = create_alert({}, symbol="TSLA", direction="CALL", thesis="me late")
-    assert r.get("error") == "estrategia no valida"
+    assert r.get("error") == "decision_id requerido"
     r = create_alert({}, symbol="TSLA", direction="CALL", thesis="x",
                      estrategia="E11")
-    assert r.get("error") == "estrategia no valida", "E11 no deberia operarse"
+    assert r.get("error") == "decision_id requerido"
 
 
 def test_consultar_manual_avisa_cuando_no_hay_regla():
     from powerTradeAi_djangoApp.agent.skills import consultar_manual
     r = consultar_manual({}, consulta="tecnica-inventada-999")
     assert "aviso" in r and "NO inventes" in r["aviso"]
+
+
+def test_runner_no_ofrece_backtest_generico_ni_refuerzo(monkeypatch):
+    from types import SimpleNamespace
+
+    from powerTradeAi_djangoApp.agent import runner
+
+    captured = {}
+
+    def fake_chat(messages, tools):
+        captured["names"] = {item["function"]["name"] for item in tools}
+        return SimpleNamespace(content="sin setup", tool_calls=None)
+
+    monkeypatch.setattr(runner.llm, "chat", fake_chat)
+    runner._execute_loop(
+        {"channel": "agent"}, [{"role": "user", "content": "evalua"}], [])
+
+    assert "backtest_reversion" not in captured["names"]
+    assert "reinforce_position" not in captured["names"]
+    assert "validate_investep_setup" in captured["names"]
+    assert "create_alert" in captured["names"]
+
+
+def test_chat_tampoco_ejecuta_una_skill_de_escritura_alucinada(monkeypatch):
+    from types import SimpleNamespace
+
+    from powerTradeAi_djangoApp.agent import runner
+
+    calls = {"llm": 0, "executed": 0}
+
+    def forbidden(ctx, **kwargs):
+        calls["executed"] += 1
+        return {"created": True}
+
+    monkeypatch.setattr(SKILLS["create_alert"], "func", forbidden)
+
+    def fake_chat(messages, tools):
+        calls["llm"] += 1
+        if calls["llm"] == 1:
+            function = SimpleNamespace(
+                name="create_alert", arguments='{"decision_id": 1}')
+            tool_call = SimpleNamespace(id="call-1", function=function)
+            return SimpleNamespace(content="", tool_calls=[tool_call])
+        return SimpleNamespace(content="solo analisis", tool_calls=None)
+
+    monkeypatch.setattr(runner.llm, "chat", fake_chat)
+    transcript = []
+    runner._execute_loop(
+        {"channel": "chat"}, [{"role": "user", "content": "opera"}],
+        transcript)
+
+    assert calls["executed"] == 0
+    assert transcript[0]["result"]["error"].startswith("skill no permitida")

@@ -14,7 +14,9 @@ import pytest
 
 from powerTradeAi_djangoApp.strategies.base import ScanContext
 from powerTradeAi_djangoApp.strategies.e01e02 import (
-    E01E02AperturaBase, _bollinger, _escala, _linea_max_contactos)
+    E01E02AperturaBase, E01E02IntradiaBase, _bollinger, _escala,
+    _linea_max_contactos,
+)
 
 NY = ZoneInfo("America/New_York")
 DIA = date(2026, 7, 6)
@@ -69,7 +71,19 @@ def _ctx(hoy, h15, minuto=31):
 def _regla(direccion="CALL"):
     return type("R", (E01E02AperturaBase,),
                 {"symbol": "TSLA", "direction": direccion,
-                 "strategy_id": "T", "rule_version": "t"})()
+                 "strategy_id": "T", "rule_version": "t"})(params={
+                     "require_event_clear": False,
+                     "require_terrain_model": False,
+                 })
+
+
+def _regla_intradia(direccion="CALL"):
+    return type("RI", (E01E02IntradiaBase,),
+                {"symbol": "TSLA", "direction": direccion,
+                 "strategy_id": "TI", "rule_version": "ti"})(params={
+                     "require_event_clear": False,
+                     "require_terrain_model": False,
+                 })
 
 
 # --- forming_bar -----------------------------------------------------------
@@ -90,6 +104,23 @@ def test_forming_bar_crece_con_los_minutos():
     assert f["close"] == 105.0
 
 
+def test_resample_1h_se_ancla_a_la_apertura_de_0930():
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 60, 100.0, paso=0.01)
+    before_close = ScanContext(
+        provider=_Prov(_hist15()), symbol="TSLA", session_date=DIA,
+        now=datetime.combine(DIA, dtime(10, 0), tzinfo=NY), bars=hoy,
+    )
+    assert before_close.resample("1h").empty
+
+    at_close = ScanContext(
+        provider=_Prov(_hist15()), symbol="TSLA", session_date=DIA,
+        now=datetime.combine(DIA, dtime(10, 30), tzinfo=NY), bars=hoy,
+    )
+    hourly = at_close.resample("1h")
+    assert len(hourly) == 1
+    assert hourly.index[0].tz_convert(NY).time() == dtime(9, 30)
+
+
 def test_forming_bar_none_sin_minutos():
     hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 100.0)
     ctx = ScanContext(provider=_Prov(_hist15()), symbol="TSLA", session_date=DIA,
@@ -107,6 +138,7 @@ def test_e01_dispara_con_gap_alcista():
     assert s.meta["rama"] == "OPENING_GAP"
     assert s.meta["bar_state"] == "FORMING_15M"
     assert s.meta["gap_pct"] > 0
+    assert s.signal_ts.astimezone(NY).time() == dtime(9, 31)
 
 
 def test_sin_gap_no_dispara():
@@ -126,13 +158,14 @@ def test_e01_no_dispara_si_ya_venia_alcista():
     assert _regla("CALL").evaluate(_ctx(hoy, alcista)) is None
 
 
-def test_dispara_cuando_se_cumple_no_a_una_hora_fija():
-    """La academia NO fija hora: la señal se toma cuando se cumple la condicion.
-    El 09:31 de los ejemplos es una observacion, no un requisito."""
+def test_apertura_solo_evalua_el_primer_minuto_cerrado():
+    """09:31 es la rama de gap; luego corresponde evaluar INTRADAY_BREAK."""
     hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 103.0, paso=0.05)
-    for minuto in (31, 33, 36, 40, 44):
-        s = _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=minuto))
-        assert s is not None, f"deberia poder disparar a las 09:{minuto}"
+    assert _regla("CALL").evaluate(
+        _ctx(hoy, _hist15(), minuto=31)) is not None
+    for minuto in (32, 33, 36, 40, 44):
+        assert _regla("CALL").evaluate(
+            _ctx(hoy, _hist15(), minuto=minuto)) is None
 
 
 def test_fuera_de_la_ventana_de_apertura_no_evalua():
@@ -142,13 +175,47 @@ def test_fuera_de_la_ventana_de_apertura_no_evalua():
     assert _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=50)) is None
 
 
-def test_el_gap_se_mide_siempre_contra_la_apertura():
-    """Dispare a las 09:31 o a las 09:44, el gap es el mismo hecho: la
-    discontinuidad entre el cierre regular anterior y la apertura."""
+def test_el_gap_se_mide_contra_el_cierre_regular_anterior():
     hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 103.0, paso=0.05)
-    a = _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=31))
-    b = _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=44))
-    assert a.meta["gap_pct"] == b.meta["gap_pct"]
+    signal = _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=31))
+    expected = (103.0 - 100.0) / 100.0 * 100
+    assert signal.meta["gap_pct"] == pytest.approx(expected)
+
+
+def test_intradia_confirma_con_cierre_de_15m(monkeypatch):
+    """La rama frecuente usa una vela cerrada, no el gap de las 09:31."""
+    monkeypatch.setattr(
+        "powerTradeAi_djangoApp.strategies.e01e02._linea_max_contactos",
+        lambda *args, **kwargs: {
+            "contactos": 2, "nivel_ultimo": 101.0, "nivel_siguiente": 101.0,
+        },
+    )
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 100.0, paso=0.20)
+    ctx = ScanContext(
+        provider=_Prov(_hist15()), symbol="TSLA", session_date=DIA,
+        now=datetime.combine(DIA, dtime(9, 45), tzinfo=NY), bars=hoy,
+    )
+    signal = _regla_intradia("CALL").evaluate(ctx)
+    assert signal is not None
+    assert signal.signal_ts.astimezone(NY).time() == dtime(9, 45)
+    assert signal.meta["rama"] == "INTRADAY_BREAK"
+    assert signal.meta["bar_state"] == "CLOSED_15M"
+
+
+def test_intradia_no_acepta_solo_una_mecha(monkeypatch):
+    monkeypatch.setattr(
+        "powerTradeAi_djangoApp.strategies.e01e02._linea_max_contactos",
+        lambda *args, **kwargs: {
+            "contactos": 2, "nivel_ultimo": 101.0, "nivel_siguiente": 101.0,
+        },
+    )
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 100.0, paso=0.01)
+    hoy.loc[hoy.index[-1], "high"] = 103.0
+    ctx = ScanContext(
+        provider=_Prov(_hist15()), symbol="TSLA", session_date=DIA,
+        now=datetime.combine(DIA, dtime(9, 45), tzinfo=NY), bars=hoy,
+    )
+    assert _regla_intradia("CALL").evaluate(ctx) is None
 
 
 # --- causalidad (lo critico) ----------------------------------------------
@@ -214,8 +281,9 @@ def test_el_universo_esta_registrado_en_ambas_direcciones():
     for sym in UNIVERSO:
         assert f"{sym}_E01_APERTURA" in ids
         assert f"{sym}_E02_APERTURA" in ids
-    assert len(UNIVERSO) >= 25, "el universo debe ser amplio: el limite de tres"
-    " instrumentos es de ancho de banda humano, no del software"
+        assert f"{sym}_E01_INTRADIA" in ids
+        assert f"{sym}_E02_INTRADIA" in ids
+    assert len(UNIVERSO) >= 25, "el catalogo de investigacion debe conservarse"
 
 
 def test_descarta_contratos_con_spread_ancho():
@@ -223,7 +291,9 @@ def test_descarta_contratos_con_spread_ancho():
     cualquier objetivo de 10-15% de prima."""
     class Q:
         is_live = True
-        def __init__(self, bid, ask): self.bid, self.ask = bid, ask
+        def __init__(self, bid, ask):
+            self.bid, self.ask = bid, ask
+            self.ts = datetime.combine(DIA, dtime(9, 31), tzinfo=NY)
 
     class ProvSpread(_Prov):
         def __init__(self, h15, bid, ask):

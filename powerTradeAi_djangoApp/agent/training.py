@@ -43,8 +43,10 @@ def train_day(symbol: str, day: date_cls, step: int = 5,
         goal = (
             f"Estas operando {sym} el {day} a las {t:%H:%M} ET (ENTRENAMIENTO "
             f"en tiempo pasado; solo ves datos hasta ahora). Gestiona tus "
-            f"posiciones abiertas y busca oportunidades como day-trader. "
-            f"Define riesgo (target/stop) en cada entrada.")
+            f"posiciones abiertas. Para entradas nuevas revisa exclusivamente "
+            f"E01/E02, identifica OPENING_GAP o INTRADAY_TREND_CHANGE, consulta "
+            f"el manual y usa validate_investep_setup. Crea la alerta solo con "
+            f"un decision_id VALID; ante WAIT/BLOCKED registra los blockers.")
         try:
             run = run_agent(goal, symbols=[sym], trigger="training", as_of=t)
             closed = resolve_agent_alerts(now=t, source=Alert.Source.AGENT_TRAIN)
@@ -66,9 +68,10 @@ def train_day(symbol: str, day: date_cls, step: int = 5,
 
     closed_all = Alert.objects.filter(
         source=Alert.Source.AGENT_TRAIN, symbol=sym,
-        session_date=day, status=Alert.Status.CLOSED)
+        session_date=day, status=Alert.Status.CLOSED,
+        evaluation_version="investep_v2")
     n = closed_all.count()
-    wins = closed_all.filter(net_pct__gt=0).count()
+    wins = closed_all.filter(net_dollars__gt=0).count()
     avg = closed_all.aggregate(a=Avg("net_pct"))["a"]
     summary = {
         "symbol": sym, "date": str(day), "steps": n_steps, "trades": n,

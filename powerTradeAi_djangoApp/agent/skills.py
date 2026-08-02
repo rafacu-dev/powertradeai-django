@@ -8,7 +8,7 @@ funcion con ``@skill``; el agente la ve automaticamente.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -156,7 +156,7 @@ def _bollinger_and_mas(closes, period=20, k=2):
             "middle": round(mid, 2),
             "lower": round(mid - k * std, 2),
         }
-    for p in (9, 20, 50, 100, 200):
+    for p in (20, 40, 100, 200):
         if n >= p:
             out[f"ma{p}"] = round(float(closes.iloc[-p:].mean()), 2)
     return out
@@ -478,7 +478,11 @@ def consultar_manual(ctx, consulta: str):
     salida = {"consulta": c, "secciones": res}
     cod = c.upper()
     if cod in investep.ESTRATEGIAS:
-        salida["operable"] = True
+        ctx.setdefault("manual_consulted", set()).add(cod)
+        salida["documentada"] = True
+        salida["operable"] = cod in investep.AUTOMATIZADAS
+        if not salida["operable"]:
+            salida["motivo"] = "NO_DETERMINISTIC_VALIDATOR"
         salida["nombre"] = investep.ESTRATEGIAS[cod]
     elif cod in investep.NO_OPERABLES:
         salida["operable"] = False
@@ -487,6 +491,67 @@ def consultar_manual(ctx, consulta: str):
         salida["aviso"] = ("Sin coincidencias. Si el manual no lo documenta, NO "
                            "inventes la regla: descarta la operacion.")
     return salida
+
+
+@skill(
+    "validate_investep_setup",
+    "Recalcula en el servidor una propuesta Investep y aplica direccion, reloj, "
+    "setup mecanico, calendario, terreno y Plan 10. Devuelve un decision_id. "
+    "Solo un resultado VALID puede pasar a create_alert; WAIT o BLOCKED son "
+    "resultados finales y no se pueden justificar con narrativa.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "strategy_code": {
+                "type": "string", "enum": [
+                    "E01", "E02", "E03", "E04", "E05",
+                    "E06", "E07", "E08", "E09", "E10",
+                ],
+            },
+            "branch": {
+                "type": "string",
+                "description": "Rama exacta. E01/E02: OPENING_GAP o "
+                               "INTRADAY_BREAK.",
+            },
+            "thesis": {
+                "type": "string",
+                "description": "Condiciones observadas, invalidacion y barrera.",
+            },
+            "target_pct": {
+                "type": "number",
+                "description": "Objetivo Plan 10 sobre prima, entre 10 y 15.",
+            },
+            "stop_pct": {
+                "type": "number",
+                "description": "Stop Plan 10 sobre prima; debe ser 20.",
+            },
+        },
+        "required": ["symbol", "strategy_code", "branch", "thesis"],
+    },
+)
+def validate_investep_setup(
+    ctx,
+    symbol: str,
+    strategy_code: str,
+    branch: str,
+    thesis: str,
+    target_pct: float = 15.0,
+    stop_pct: float = 20.0,
+):
+    from .decision import public_result, validate_setup
+
+    decision = validate_setup(
+        ctx,
+        _provider(),
+        symbol=symbol,
+        strategy_code=strategy_code,
+        branch=branch,
+        thesis=thesis,
+        target_pct=target_pct,
+        stop_pct=stop_pct,
+    )
+    return public_result(decision)
 
 
 @skill(
@@ -505,11 +570,20 @@ def consultar_manual(ctx, consulta: str):
             "timeframe": {"type": "string", "enum": ["15m", "1h", "1d"],
                           "description": "Temporalidad. E01/E02 usan 15m; "
                                          "E03/E04 usan 1h."},
+            "include_forming": {
+                "type": "boolean",
+                "description": "Solo para OPENING_GAP E01/E02: recalcula 15m "
+                               "con el cierre parcial observable.",
+            },
         },
         "required": ["symbol"],
     },
 )
-def get_estado_volatilidad(ctx, symbol: str, timeframe: str = "15m"):
+def get_estado_volatilidad(ctx, symbol: str, timeframe: str = "15m",
+                           include_forming: bool = False):
+    import numpy as np
+    import pandas as pd
+
     from .volatilidad import evaluar
 
     provider = _provider()
@@ -524,23 +598,269 @@ def get_estado_volatilidad(ctx, symbol: str, timeframe: str = "15m"):
     if bars is None or bars.empty:
         return {"symbol": sym, "error": "sin datos"}
 
-    # Solo sesion regular: el premarket ensancha las bandas artificialmente y ya
-    # produjo un veredicto falso en este proyecto.
-    from ..strategies.base import solo_rth
-    bars = solo_rth(bars)
+    # Solo los marcos intradia se filtran por hora. Una vela diaria suele estar
+    # fechada a medianoche; aplicarle 09:30-16:00 elimina toda la serie.
+    if timeframe in {"15m", "1h"}:
+        from ..strategies.base import solo_rth
+        bars = solo_rth(bars)
     if bars.empty:
         return {"symbol": sym, "error": "sin barras de sesion regular"}
+
+    now = _now(ctx)
+    if timeframe in {"15m", "1h"}:
+        minutes = 15 if timeframe == "15m" else 60
+        cutoff = pd.Timestamp(now) - pd.Timedelta(minutes=minutes)
+        bars = bars[bars.index <= cutoff]
+    elif timeframe == "1d":
+        bars = bars[bars.index.tz_convert(NY).date < now.astimezone(NY).date()]
+    if bars.empty:
+        return {"symbol": sym, "error": "sin barras cerradas observables"}
 
     precio = None
     try:
         precio = _spot(ctx, provider, sym)
     except Exception:
         pass
-    out = evaluar(bars["close"].to_numpy(float), precio)
+    closes = bars["close"].to_numpy(float)
+    bar_state = "CLOSED"
+    partial_close = None
+    if include_forming:
+        if timeframe != "15m":
+            return {"symbol": sym, "error": "include_forming solo admite 15m"}
+        try:
+            minute = provider.bars_1m(sym, now.astimezone(NY).date())
+            minute_cutoff = pd.Timestamp(now) - pd.Timedelta(minutes=1)
+            minute = minute[minute.index <= minute_cutoff]
+            period_start = pd.Timestamp(now).tz_convert("UTC").floor("15min")
+            partial = minute[minute.index >= period_start]
+            if not partial.empty:
+                partial_close = float(partial["close"].iloc[-1])
+                closes = np.append(closes, partial_close)
+                precio = partial_close
+                bar_state = "FORMING_15M"
+        except Exception as exc:
+            return {"symbol": sym, "error": f"sin barra parcial: {exc}"}
+        if partial_close is None:
+            return {"symbol": sym, "error": "sin minuto cerrado para 15m parcial"}
+
+    out = evaluar(closes, precio)
     out.update(symbol=sym, timeframe=timeframe,
                barras_usadas=int(len(bars)),
-               ultima_barra=bars.index[-1].tz_convert(NY).strftime("%Y-%m-%d %H:%M"))
+               ultima_barra=bars.index[-1].tz_convert(NY).strftime("%Y-%m-%d %H:%M"),
+               bar_state=bar_state,
+               partial_close=round(partial_close, 4) if partial_close is not None else None)
     return out
+
+
+@skill(
+    "get_event_risk",
+    "Comprueba earnings y eventos macro contra la cobertura configurada. "
+    "Devuelve CLEAR, BLOCKED o UNKNOWN; UNKNOWN bloquea una decision Investep.",
+    {
+        "type": "object",
+        "properties": {"symbol": {"type": "string"}},
+        "required": ["symbol"],
+    },
+)
+def get_event_risk(ctx, symbol: str):
+    from ..strategies.gates import event_gate
+
+    return {"symbol": symbol.upper(), **event_gate(symbol, _now(ctx))}
+
+
+@skill(
+    "get_available_terrain",
+    "Calcula la primera barrera en la direccion propuesta usando MA20/40/100/200 "
+    "y pivotes, y la compara con el modelo empirico spot-prima del ticker. "
+    "Sin modelo devuelve PENDING_EMPIRICAL_MOVE_MODEL.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "direction": {"type": "string", "enum": ["CALL", "PUT"]},
+            "target_pct": {"type": "number"},
+        },
+        "required": ["symbol", "direction"],
+    },
+)
+def get_available_terrain(ctx, symbol: str, direction: str,
+                          target_pct: float = 15.0):
+    import math
+
+    from ..strategies.base import ScanContext
+    from ..strategies.gates import assess_terrain
+
+    provider = _provider()
+    sym = symbol.upper()
+    direction = str(direction).upper()
+    if direction not in {"CALL", "PUT"}:
+        return {"symbol": sym, "status": "BLOCKED",
+                "blocker": "INVALID_DIRECTION"}
+    try:
+        target = float(target_pct)
+    except (TypeError, ValueError, OverflowError):
+        target = float("nan")
+    if not math.isfinite(target) or not 10 <= target <= 15:
+        return {"symbol": sym, "status": "BLOCKED",
+                "blocker": "PLAN10_TARGET_OUT_OF_RANGE"}
+    now = _now(ctx).astimezone(NY)
+    try:
+        bars = provider.bars_1m(sym, now.date())
+        spot = _spot(ctx, provider, sym)
+    except Exception as exc:
+        return {"symbol": sym, "status": "UNKNOWN",
+                "blocker": "MARKET_DATA_ERROR", "error": str(exc)}
+    if not math.isfinite(float(spot)) or float(spot) <= 0:
+        return {"symbol": sym, "status": "UNKNOWN",
+                "blocker": "INVALID_SPOT_PRICE"}
+    scan_ctx = ScanContext(
+        provider=provider, symbol=sym, session_date=now.date(),
+        now=now, bars=bars)
+    return {
+        "symbol": sym,
+        "direction": direction,
+        "spot": round(float(spot), 4),
+        **assess_terrain(
+            scan_ctx, direction, float(spot),
+            target_premium_pct=target),
+    }
+
+
+@skill(
+    "calculate_option_price_range",
+    "Calcula el rango academico de costo por contrato comparando hasta ocho "
+    "strikes cercanos al dinero con sus excursiones intradia de prima. Usa "
+    "quotes de ThetaData a traves del provider configurado.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "direction": {"type": "string", "enum": ["CALL", "PUT"]},
+            "dte": {"type": "integer"},
+            "minimum_contract_cost": {"type": "number"},
+            "maximum_contract_cost": {"type": "number"},
+        },
+        "required": ["symbol", "direction"],
+    },
+)
+def calculate_option_price_range_skill(
+    ctx,
+    symbol: str,
+    direction: str,
+    dte: int = 0,
+    minimum_contract_cost: float = 20.0,
+    maximum_contract_cost: float | None = None,
+):
+    import math
+
+    import pandas as pd
+
+    from ..data import candidate_expirations, occ_symbol
+    from .option_range import calculate_option_price_range
+
+    provider = _provider()
+    sym = symbol.upper()
+    direction = str(direction).upper()
+    if direction not in {"CALL", "PUT"}:
+        return {"status": "blocked", "blocker": "INVALID_DIRECTION"}
+    try:
+        requested_dte = int(dte)
+        minimum_cost = float(minimum_contract_cost)
+        maximum_cost = (
+            float(maximum_contract_cost)
+            if maximum_contract_cost is not None else None)
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "blocked", "blocker": "INVALID_RANGE_INPUT"}
+    if (not 0 <= requested_dte <= 30
+            or not math.isfinite(minimum_cost) or minimum_cost <= 0
+            or (maximum_cost is not None
+                and (not math.isfinite(maximum_cost)
+                     or maximum_cost < minimum_cost))):
+        return {"status": "blocked", "blocker": "INVALID_RANGE_INPUT"}
+    now = _now(ctx).astimezone(NY)
+    try:
+        spot = _spot(ctx, provider, sym)
+    except Exception as exc:
+        return {"status": "blocked", "blocker": "MARKET_DATA_ERROR",
+                "error": str(exc)}
+    if not math.isfinite(float(spot)) or float(spot) <= 0:
+        return {"status": "blocked", "blocker": "INVALID_SPOT_PRICE"}
+    step = _strike_step(float(spot))
+    atm = round(float(spot) / step) * step
+    strikes = sorted(
+        [atm + offset * step for offset in range(-5, 6)],
+        key=lambda value: abs(value - float(spot)))
+    expirations = candidate_expirations(
+        now.date(), max_dte=max(requested_dte + 7, 7))
+    expirations.sort(
+        key=lambda value: abs((value - now.date()).days - requested_dte))
+    start = datetime.combine(
+        now.date(), datetime(2000, 1, 1, 9, 30).time(), tzinfo=NY)
+
+    last_error = None
+    for expiration in expirations:
+        rows = []
+        for strike in strikes:
+            occ = occ_symbol(sym, expiration, direction, strike)
+            try:
+                quotes = provider.option_quotes(occ, start, now, interval="1m")
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                continue
+            if quotes is None or quotes.empty or "ask" not in quotes:
+                continue
+            quotes = quotes[quotes.index <= pd.Timestamp(now)]
+            asks = pd.to_numeric(quotes["ask"], errors="coerce")
+            asks = asks[asks > 0]
+            if asks.empty:
+                continue
+            latest_index = asks.index[-1]
+            bid = None
+            if "bid" in quotes:
+                raw_bid = pd.to_numeric(quotes.loc[[latest_index], "bid"], errors="coerce")
+                bid = float(raw_bid.iloc[-1]) if not raw_bid.empty else None
+            ask = float(asks.iloc[-1])
+            if bid is not None and (bid <= 0 or ask < bid):
+                continue
+            rows.append({
+                "occ_symbol": occ,
+                "expiration": expiration,
+                "strike": strike,
+                "ask": ask,
+                "bid": bid,
+                "low": float(asks.min()),
+                "high": float(asks.max()),
+                "spread_pct": (
+                    round((ask - bid) / ask * 100, 4)
+                    if bid is not None and ask else None),
+                "quote_timestamp": latest_index.isoformat(),
+            })
+        if len(rows) < 2:
+            continue
+        try:
+            result = calculate_option_price_range(
+                pd.DataFrame(rows),
+                spot=float(spot),
+                direction=direction,
+                minimum_contract_cost=minimum_cost,
+                maximum_contract_cost=maximum_cost,
+            )
+        except ValueError as exc:
+            last_error = str(exc)
+            continue
+        result.update({
+            "symbol": sym,
+            "direction": direction,
+            "spot": round(float(spot), 4),
+            "expiration": expiration.isoformat(),
+            "observed_at": now.isoformat(),
+        })
+        return result
+    return {
+        "status": "blocked",
+        "blocker": "OPTION_RANGE_DATA_INSUFFICIENT",
+        "error": last_error,
+    }
 
 
 def _strike_step(spot: float) -> float:
@@ -616,7 +936,7 @@ def get_option_chain(ctx, symbol: str, right: str, dte: int = 0):
 
 @skill(
     "get_account",
-    "Estado de tu cuenta (papel): tamano, capital ya desplegado en posiciones "
+    "Estado de la cuenta interna: tamano, capital ya desplegado en posiciones "
     "abiertas, disponible, y el riesgo maximo sugerido por operacion. Usalo "
     "para dimensionar cuantos contratos comprar sin arriesgar de mas.",
     {"type": "object", "properties": {}},
@@ -626,10 +946,11 @@ def get_account(ctx):
 
     from ..models import Alert
     cfg = getattr(settings, "POWERTRADEAI", {})
-    size = float(cfg.get("PAPER_ACCOUNT", 10000))
+    size = float(cfg.get("ACCOUNT_SIZE", cfg.get("PAPER_ACCOUNT", 10000)))
     risk_pct = float(cfg.get("RISK_PCT_PER_TRADE", 2.0))
     open_qs = Alert.objects.filter(source=_alert_source(ctx),
-                                   status=Alert.Status.PENDING)
+                                   status=Alert.Status.PENDING,
+                                   evaluation_version="investep_v2")
     deployed = 0.0
     for a in open_qs:
         cost = (a.meta or {}).get("cost")
@@ -710,133 +1031,284 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
 
 @skill(
     "create_alert",
-    "Compra una OPCION real (CALL o PUT) y registra la operacion. TU eliges el "
-    "contrato: strike, dias al vencimiento (dte) y cuantos contratos, segun tu "
-    "tesis y la gestion de riesgo (mira get_option_chain y get_account primero). "
-    "Se registra la prima de entrada (ask) real de ThetaData. target_pct y "
-    "stop_pct son sobre la PRIMA de la opcion (no el activo): asi el objetivo es "
-    "ganancia real y el stop controla el theta. Cierra por lo que ocurra primero.",
+    "Registra una operacion interna a partir de un decision_id VALID emitido por "
+    "validate_investep_setup. El servidor toma estrategia, direccion, Plan 10 y "
+    "cantidad de contratos de la decision y de los limites de cuenta; el modelo "
+    "no puede reemplazarlos.",
     {
         "type": "object",
         "properties": {
-            "symbol": {"type": "string"},
-            "direction": {"type": "string", "enum": ["CALL", "PUT"]},
-            "estrategia": {
-                "type": "string",
-                "description": "Codigo del manual que estas aplicando (E01-E10). "
-                               "Obligatorio: sin el, la alerta se rechaza.",
+            "decision_id": {
+                "type": "integer",
+                "description": "Decision VALID devuelta por validate_investep_setup.",
             },
-            "thesis": {"type": "string",
-                       "description": "Que condicion CONCRETA de la estrategia "
-                                      "se cumplio. No vale una corazonada."},
             "strike": {"type": "number",
                        "description": "Strike del contrato (si lo omites, ATM)."},
             "dte": {"type": "integer",
-                    "description": "Dias al vencimiento (0 = mismo dia; a menos "
-                                   "DTE mas theta)."},
-            "contracts": {"type": "integer",
-                          "description": "Cuantos contratos (sizing/riesgo)."},
+                    "description": "DTE preferido; el servidor busca un "
+                                   "vencimiento real cercano."},
             "horizon_minutes": {"type": "integer",
                                 "description": "Cuanto vale tu tesis (def. 120)."},
-            "target_pct": {"type": "number",
-                           "description": "Objetivo de ganancia en %% de la PRIMA "
-                                          "de la opcion (p.ej. 30 = vender si la "
-                                          "prima sube 30%%)."},
-            "stop_pct": {"type": "number",
-                         "description": "Stop de perdida en %% de la PRIMA (p.ej. "
-                                        "20 = vender si la prima cae 20%%). Asi "
-                                        "controlas el theta."},
         },
-        "required": ["symbol", "direction", "thesis"],
+        "required": ["decision_id"],
     },
 )
-def create_alert(ctx, symbol: str, direction: str, thesis: str,
-                 estrategia: str | None = None,
-                 strike: float | None = None, dte: int = 0, contracts: int = 1,
-                 horizon_minutes: int = 120,
-                 target_pct: float | None = None,
-                 stop_pct: float | None = None):
-    from ..data import occ_symbol
-    from ..models import Alert, Strategy
-    from . import investep
+def create_alert(ctx, decision_id: int | None = None,
+                 strike: float | None = None, dte: int = 0,
+                 horizon_minutes: int = 120, **legacy):
+    import math
 
-    # PUERTA DURA del modo Investep. Sin esto, "opera solo las del manual" seria
-    # una sugerencia del prompt que el modelo puede saltarse en cualquier
-    # llamada; aqui no hay alerta si no declara una estrategia documentada.
-    ok, detalle = investep.es_operable(estrategia or "")
-    if not ok:
-        return {"error": "estrategia no valida", "detalle": detalle,
-                "operables": sorted(investep.ESTRATEGIAS)}
-    sym = symbol.upper()
+    from django.conf import settings
+    from django.db import transaction
+
+    from ..data import occ_symbol
+    from ..models import Alert, InvestepDecision, RiskControl, Strategy
+    from ..strategies.gates import validate_quote
+    from .decision import PROMPT_VERSION, manual_hash
+
+    if decision_id is None:
+        return {
+            "error": "decision_id requerido",
+            "detalle": "llama primero a validate_investep_setup",
+        }
+    try:
+        decision = InvestepDecision.objects.get(pk=int(decision_id))
+    except (InvestepDecision.DoesNotExist, TypeError, ValueError):
+        return {"error": "decision Investep inexistente"}
+    expected_source = _alert_source(ctx)
+    if decision.source != expected_source:
+        return {"error": "decision de otra modalidad", "status": decision.status}
+    if decision.agent_run_id != ctx["run"].id:
+        return {"error": "decision de otra corrida"}
+    if decision.status != InvestepDecision.Status.VALID:
+        return {
+            "error": "decision no validada",
+            "status": decision.status,
+            "blockers": decision.blockers,
+        }
+    if (decision.manual_hash != manual_hash()
+            or decision.prompt_version != PROMPT_VERSION):
+        return {"error": "decision de una version obsoleta"}
+    if decision.signal_ts is None:
+        return {"error": "decision valida sin signal_ts auditable"}
+
+    existing = Alert.objects.filter(investep_decision=decision).first()
+    if existing is not None:
+        return {
+            "alert_id": existing.id,
+            "created": False,
+            "decision_id": decision.id,
+            "status": existing.status,
+        }
+
+    now = _now(ctx).astimezone(NY)
+    cfg = getattr(settings, "POWERTRADEAI", {})
+    if not _is_training(ctx):
+        age = (now - decision.as_of.astimezone(NY)).total_seconds()
+        if age < 0 or age > int(cfg.get("MAX_DECISION_AGE_SECONDS", 180)):
+            return {"error": "decision expirada", "age_seconds": round(age, 2)}
+    if not (datetime(2000, 1, 1, 9, 30).time()
+            <= now.time() < datetime(2000, 1, 1, 16, 0).time()):
+        return {"error": "fuera de sesion regular"}
+
+    sym = decision.symbol
+    direction = decision.direction
+    thesis = decision.thesis
+    target_pct = float(decision.evidence.get("target_pct", 15.0))
+    stop_pct = float(decision.evidence.get("stop_pct", 20.0))
     provider = _provider()
     try:
         spot = _spot(ctx, provider, sym)
     except Exception:
         return {"error": "sin precio del subyacente"}
+    if not math.isfinite(float(spot)) or float(spot) <= 0:
+        return {"error": "precio del subyacente invalido"}
+
+    try:
+        requested_dte = int(dte)
+    except (TypeError, ValueError):
+        return {"error": "dte invalido"}
+    if not 0 <= requested_dte <= 30:
+        return {"error": "dte fuera de rango", "allowed": "0-30"}
+    try:
+        requested_horizon = int(horizon_minutes or 120)
+    except (TypeError, ValueError):
+        return {"error": "horizon_minutes invalido"}
+    if not 5 <= requested_horizon <= 390:
+        return {
+            "error": "horizon_minutes fuera de rango",
+            "allowed": "5-390",
+        }
 
     # Elegir el contrato: strike (ATM si no se da) + expiracion segun dte.
     step = _strike_step(spot)
     if strike is None:
         strike = round(spot / step) * step
-    strike = round(float(strike), 2)
-    target_exp, real_dte = _pick_expiration(ctx, sym, dte)
-    if target_exp is None:
-        return {"error": "sin expiraciones candidatas"}
-    occ = occ_symbol(sym, target_exp, direction, strike)
-
-    # Prima de entrada REAL (ask) via ThetaData.
-    at = ctx.get("as_of")
     try:
-        q = provider.option_quote(occ, at=at) if at else provider.option_quote(occ)
-    except Exception as exc:
-        return {"error": f"sin quote del contrato: {exc}", "occ": occ}
-    if q is None or not getattr(q, "ask", None):
-        return {"error": "el contrato no tiene quote utilizable; prueba otro "
-                         "strike o dte", "occ": occ}
+        strike = round(float(strike), 2)
+    except (TypeError, ValueError):
+        return {"error": "strike invalido"}
+    if not math.isfinite(strike) or strike <= 0:
+        return {"error": "strike invalido"}
+    # Se prueban vencimientos cercanos al DTE solicitado. Un dia habil no implica
+    # que el simbolo tenga vencimiento; una quote ausente hace avanzar al siguiente.
+    from ..data import candidate_expirations
+    today = now.date()
+    expirations = candidate_expirations(
+        today, max_dte=max(requested_dte + 7, 7))
+    expirations.sort(
+        key=lambda value: abs((value - today).days - requested_dte))
+    at = ctx.get("as_of")
+    q = None
+    quote_check = None
+    target_exp = None
+    occ = ""
+    for candidate in expirations:
+        candidate_occ = occ_symbol(sym, candidate, direction, strike)
+        try:
+            candidate_quote = (
+                provider.option_quote(candidate_occ, at=at)
+                if at else provider.option_quote(candidate_occ)
+            )
+        except Exception:
+            continue
+        check = validate_quote(
+            candidate_quote,
+            as_of=at or now,
+            max_spread_pct=float(cfg.get("MAX_OPTION_SPREAD_PCT", 5.0)),
+            allow_after_seconds=(
+                float(cfg.get(
+                    "MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS", 90))
+                if at else None
+            ),
+        )
+        if check["status"] == "VALID":
+            q, quote_check, target_exp, occ = (
+                candidate_quote, check, candidate, candidate_occ)
+            break
+    if q is None or target_exp is None:
+        return {
+            "error": "sin vencimiento y quote utilizables",
+            "dte": requested_dte,
+        }
+    real_dte = (target_exp - today).days
     entry_ask = float(q.ask)
-    entry_bid = float(getattr(q, "bid", 0) or 0)
-    contracts = max(int(contracts or 1), 1)
-    cost = round(entry_ask * 100 * contracts, 2)
+    entry_bid = float(q.bid)
 
     training = _is_training(ctx)
-    source = _alert_source(ctx)
+    source = expected_source
     strategy, _ = Strategy.objects.get_or_create(
-        strategy_id=f"AGENT:{sym}",
-        defaults={"name": f"Agente {sym}", "symbol": sym,
-                  "rule_version": "agent_v1", "enabled": False})
-    now = _now(ctx)
+        strategy_id=(
+            f"AGENT:{sym}:{decision.strategy_code}:{decision.branch}"[:80]
+        ),
+        defaults={
+            "name": (
+                f"Agente {sym} {decision.strategy_code} {decision.branch}"
+            ),
+            "symbol": sym,
+            "rule_version": decision.rule_version or "agent_investep_v2",
+            "enabled": False,
+        })
     today = now.astimezone(NY).date()
-    horizon = max(int(horizon_minutes or 120), 5)
+    horizon = requested_horizon
+    entry_ts = getattr(q, "ts", None) or now
     close_dt = datetime.combine(today, datetime(2000, 1, 1, 16, 0).time(),
                                 tzinfo=NY)
-    exit_at = min(now + timedelta(minutes=horizon), close_dt)
-    meta = {"thesis": thesis, "by": "agent", "entry_price": spot,
+    exit_at = min(entry_ts + timedelta(minutes=horizon), close_dt)
+    with transaction.atomic():
+        RiskControl.objects.select_for_update().get_or_create(key="agent")
+        locked = InvestepDecision.objects.select_for_update().get(pk=decision.pk)
+        existing = Alert.objects.filter(investep_decision=locked).first()
+        if existing is not None:
+            return {
+                "alert_id": existing.id,
+                "created": False,
+                "decision_id": locked.id,
+                "status": existing.status,
+            }
+        duplicate = Alert.objects.filter(
+            source=expected_source,
+            symbol=locked.symbol,
+            academy_strategy=locked.strategy_code,
+            strategy_branch=locked.branch,
+            direction=locked.direction,
+            signal_ts=locked.signal_ts,
+            evaluation_version="investep_v2",
+        ).first()
+        if duplicate is not None:
+            return {
+                "alert_id": duplicate.id,
+                "created": False,
+                "decision_id": locked.id,
+                "status": duplicate.status,
+                "reason": "duplicate_academic_signal",
+            }
+        account_size = float(
+            cfg.get("ACCOUNT_SIZE", cfg.get("PAPER_ACCOUNT", 10000)))
+        risk_pct = float(cfg.get("RISK_PCT_PER_TRADE", 2.0))
+        max_contracts = max(int(cfg.get("MAX_CONTRACTS_PER_TRADE", 5)), 1)
+        deployed = sum(
+            float((item.meta or {}).get("cost", 0) or 0)
+            for item in Alert.objects.filter(
+                source=expected_source, status=Alert.Status.PENDING)
+        )
+        budget = min(
+            account_size * risk_pct / 100,
+            max(account_size - deployed, 0),
+        )
+        one_contract_cost = entry_ask * 100
+        contracts = min(math.floor(budget / one_contract_cost), max_contracts)
+        if contracts < 1:
+            return {
+                "error": "contrato excede el riesgo disponible",
+                "contract_cost": round(one_contract_cost, 2),
+                "risk_budget": round(budget, 2),
+            }
+        cost = round(entry_ask * 100 * contracts, 2)
+        meta = {
+            "thesis": thesis, "by": "agent", "entry_price": spot,
             "horizon_minutes": horizon, "dte": real_dte, "cost": cost,
-            "target_pct": round(float(target_pct), 3) if target_pct else None,
-            "stop_pct": round(abs(float(stop_pct)), 3) if stop_pct else None,
-            "training": training}
-    common = {
-        "rule_version": "agent_v1", "symbol": sym,
-        "status": Alert.Status.PENDING, "signal_ts": now, "detected_at": now,
-        "entry_ts": now, "scheduled_exit_ts": exit_at, "agent_run": ctx["run"],
-        "underlying_at_signal": spot, "occ_symbol": occ,
-        "expiration": target_exp, "strike": strike, "contracts": contracts,
-        "entry_ask": entry_ask, "entry_bid": entry_bid,
-        "entry_premium": entry_ask, "meta": meta,
-    }
-    if training:
+            "target_pct": round(target_pct, 3),
+            "stop_pct": round(stop_pct, 3),
+            "training": training,
+            "strategy_code": decision.strategy_code,
+            "strategy_branch": decision.branch,
+            "decision_id": decision.id,
+            "manual_hash": decision.manual_hash,
+            "prompt_version": decision.prompt_version,
+            "quote_validation": quote_check,
+        }
         alert = Alert.objects.create(
-            strategy=strategy, session_date=today, direction=direction,
-            source=source, **common)
+            strategy=strategy, symbol=sym, session_date=today,
+            direction=direction,
+            source=source,
+            rule_version=decision.rule_version or "agent_investep_v2",
+            evaluation_version="investep_v2",
+            status=Alert.Status.PENDING,
+            signal_ts=locked.signal_ts,
+            detected_at=now,
+            entry_ts=entry_ts,
+            scheduled_exit_ts=exit_at,
+            agent_run=ctx["run"],
+            underlying_at_signal=spot,
+            occ_symbol=occ,
+            expiration=target_exp,
+            strike=strike,
+            contracts=contracts,
+            entry_ask=entry_ask,
+            entry_bid=entry_bid,
+            entry_premium=entry_ask,
+            meta=meta,
+            investep_decision=locked,
+            academy_strategy=decision.strategy_code,
+            strategy_branch=decision.branch,
+        )
         created = True
-    else:
-        alert, created = Alert.objects.update_or_create(
-            strategy=strategy, session_date=today, direction=direction,
-            source=source, defaults=common)
     return {"alert_id": alert.id, "created": created, "symbol": sym,
             "direction": direction, "contract": occ, "strike": strike,
             "dte": real_dte, "contracts": contracts,
             "entry_premium": entry_ask, "cost": cost,
+            "decision_id": decision.id,
             "resolves_at": exit_at.astimezone(NY).strftime("%H:%M")}
 
 
@@ -858,7 +1330,7 @@ def _rsi(closes, period: int = 14) -> float | None:
     "get_intraday_stats",
     "Radar intradia del activo: apertura, precio actual, rango del dia y donde "
     "esta dentro de el, gap contra el cierre previo, VWAP, ATR(14) diario y "
-    "RSI(14) en 15m. Lo esencial para decidir de day-trader.",
+    "RSI(14) en 15m. Es contexto descriptivo; no valida una estrategia.",
     {
         "type": "object",
         "properties": {"symbol": {"type": "string"}},
@@ -1051,23 +1523,24 @@ def _cluster_levels(prices, tol=0.004):
 
 @skill(
     "get_trendlines",
-    "Detecta lineas de tendencia DIAGONALES (resistencia bajista uniendo maximos "
+    "IMPLEMENTACION auxiliar: detecta lineas DIAGONALES (resistencia bajista uniendo maximos "
     "descendentes, soporte alcista uniendo minimos ascendentes) y niveles "
     "horizontales de soporte/resistencia. Devuelve donde esta cada linea AHORA y "
     "el precio respecto a ellas, para buscar rechazos, rupturas y puntos de "
-    "entrada.",
+    "entrada. Sus pivotes 3/3 no son una regla publicada y no sustituyen a "
+    "validate_investep_setup.",
     {
         "type": "object",
         "properties": {
             "symbol": {"type": "string"},
             "timeframe": {"type": "string", "enum": ["15m", "1h", "1d"],
-                          "description": "Temporalidad (1h capta la tendencia del dia)."},
+                          "description": "Temporalidad; E01/E02 requieren 15m."},
             "lookback_days": {"type": "integer", "description": "Dias atras (max 30)."},
         },
         "required": ["symbol"],
     },
 )
-def get_trendlines(ctx, symbol: str, timeframe: str = "1h",
+def get_trendlines(ctx, symbol: str, timeframe: str = "15m",
                    lookback_days: int = 15):
     import numpy as np
 
@@ -1139,7 +1612,7 @@ def get_trendlines(ctx, symbol: str, timeframe: str = "1h",
 @skill(
     "get_daily_briefing",
     "Briefing de PRE-MERCADO: resumen multi-dia para saber que esperar hoy. "
-    "Tendencia (velas seguidas del mismo lado, MA20/50 diarias), la vela de AYER "
+    "Tendencia (velas seguidas del mismo lado, MA20/40 diarias), la vela de AYER "
     "(color, fuerza, donde cerro), maximo/minimo de 3 y 10 dias y donde esta el "
     "precio, cercania al punto medio de Bollinger en 1h (pista de rebote o cambio "
     "de tendencia), RSI diario, y TU historial (dias operados, win rate, P&L, "
@@ -1192,10 +1665,10 @@ def get_daily_briefing(ctx, symbol: str):
         else:
             break
     ma20 = round(float(c.iloc[-20:].mean()), 2) if len(d) >= 20 else None
-    ma50 = round(float(c.iloc[-50:].mean()), 2) if len(d) >= 50 else None
-    sesgo = ("alcista" if ma20 and ma50 and ma20 > ma50 else
-             "bajista" if ma20 and ma50 and ma20 < ma50 else "lateral")
-    tendencia = {"sesgo_ma": sesgo, "ma20_d": ma20, "ma50_d": ma50,
+    ma40 = round(float(c.iloc[-40:].mean()), 2) if len(d) >= 40 else None
+    sesgo = ("alcista" if ma20 and ma40 and ma20 > ma40 else
+             "bajista" if ma20 and ma40 and ma20 < ma40 else "lateral")
+    tendencia = {"sesgo_ma": sesgo, "ma20_d": ma20, "ma40_d": ma40,
                  "velas_seguidas": streak,
                  "color_racha": "rojas" if last_c < last_o else "verdes"}
 
@@ -1234,8 +1707,9 @@ def get_daily_briefing(ctx, symbol: str):
                 "pista": pista}
 
     # Tu historial (causal): dias operados, win rate, P&L, ultima leccion.
-    qs = Alert.objects.filter(source=_alert_source(ctx), symbol=sym,
-                              status=Alert.Status.CLOSED)
+    qs = Alert.objects.filter(
+        source=_alert_source(ctx), symbol=sym,
+        status=Alert.Status.CLOSED, evaluation_version="investep_v2")
     as_of = ctx.get("as_of")
     if as_of is not None:
         qs = qs.filter(exit_ts__isnull=False, exit_ts__lte=as_of)
@@ -1257,15 +1731,15 @@ def get_daily_briefing(ctx, symbol: str):
         "tendencia": tendencia, "ayer": ayer, "rango_reciente": rango,
         "rsi14_diario": _rsi(c, 14),
         "dist_ma20_d_pct": round((price - ma20) / ma20 * 100, 2) if ma20 else None,
-        "dist_ma50_d_pct": round((price - ma50) / ma50 * 100, 2) if ma50 else None,
+        "dist_ma40_d_pct": round((price - ma40) / ma40 * 100, 2) if ma40 else None,
         "efecto_iman_1h": iman, "tu_historial": historial,
     }
 
 
 @skill(
     "save_note",
-    "Guarda una nota en tu cuaderno de day-trader (ideas, patrones, reglas que "
-    "quieres recordar), indexada por tema. Persiste entre corridas.",
+    "Guarda una observacion o hipotesis, indexada por tema. No convierte la "
+    "nota en regla academica ni en condicion operable. Persiste entre corridas.",
     {
         "type": "object",
         "properties": {
@@ -1297,7 +1771,8 @@ def get_open_positions(ctx, symbol: str | None = None):
     from ..models import Alert
     provider = _provider()
     qs = Alert.objects.filter(source=_alert_source(ctx),
-                              status=Alert.Status.PENDING)
+                              status=Alert.Status.PENDING,
+                              evaluation_version="investep_v2")
     if symbol:
         qs = qs.filter(symbol=symbol.upper())
     as_of = ctx.get("as_of")
@@ -1361,10 +1836,24 @@ def adjust_position(ctx, alert_id: int, target_pct: float | None = None,
     from ..models import Alert
     try:
         a = Alert.objects.get(id=alert_id, source=_alert_source(ctx),
-                              status=Alert.Status.PENDING)
+                              status=Alert.Status.PENDING,
+                              evaluation_version="investep_v2")
     except Alert.DoesNotExist:
         return {"error": "posicion no encontrada o ya cerrada"}
     meta = dict(a.meta or {})
+    if a.academy_strategy:
+        proposed_target = (
+            float(target_pct) if target_pct is not None
+            else float(meta.get("target_pct", 15.0)))
+        proposed_stop = (
+            abs(float(stop_pct)) if stop_pct is not None
+            else float(meta.get("stop_pct", 20.0)))
+        if not 10.0 <= proposed_target <= 15.0 or proposed_stop != 20.0:
+            return {
+                "error": "ajuste fuera de Plan 10",
+                "allowed_target_pct": "10-15",
+                "required_stop_pct": 20,
+            }
     changed = {}
     if target_pct is not None:
         meta["target_pct"] = round(float(target_pct), 3)
@@ -1403,11 +1892,15 @@ def adjust_position(ctx, alert_id: int, target_pct: float | None = None,
     },
 )
 def close_position(ctx, alert_id: int, reason: str):
+    from django.conf import settings
+
     from ..models import Alert
+    from ..strategies.gates import validate_quote
     provider = _provider()
     try:
         a = Alert.objects.get(id=alert_id, source=_alert_source(ctx),
-                              status=Alert.Status.PENDING)
+                              status=Alert.Status.PENDING,
+                              evaluation_version="investep_v2")
     except Alert.DoesNotExist:
         return {"error": "posicion no encontrada o ya cerrada"}
     if not a.occ_symbol or not a.entry_ask:
@@ -1420,29 +1913,40 @@ def close_position(ctx, alert_id: int, reason: str):
             else provider.option_quote(a.occ_symbol)
     except Exception as exc:
         return {"error": f"sin quote para cerrar: {exc}"}
-    exit_bid = float(getattr(q, "bid", 0) or 0) if q else 0
-    if not exit_bid:
-        return {"error": "sin bid de la opcion para cerrar ahora"}
+    config = getattr(settings, "POWERTRADEAI", {})
+    checked = validate_quote(
+        q,
+        as_of=at or _now(ctx),
+        max_spread_pct=float(config.get("MAX_OPTION_SPREAD_PCT", 5.0)),
+        allow_after_seconds=(
+            float(config.get(
+                "MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS", 90))
+            if at else None
+        ),
+    )
+    if checked["status"] != "VALID":
+        return {
+            "error": "quote no utilizable para cerrar",
+            "quote_validation": checked,
+        }
+    exit_bid = float(q.bid)
 
     entry_ask = float(a.entry_ask)
-    n = a.contracts or 1
     opt_ret = (exit_bid - entry_ask) / entry_ask * 100
-    net_d = (exit_bid - entry_ask) * 100 * n - float(a.commission) * n
-
-    a.status = Alert.Status.CLOSED
-    a.exit_ts = _now(ctx)
-    a.exit_reason = f"agente: {reason}"[:40]
-    a.exit_premium = round(exit_bid, 4)
-    a.net_pct = round(opt_ret, 2)
-    a.net_dollars = round(net_d, 2)
+    a.close(
+        exit_premium=round(exit_bid, 4),
+        exit_ts=(getattr(q, "ts", None) or _now(ctx)) if at else _now(ctx),
+        reason=f"agente: {reason}"[:40],
+    )
+    net_d = float(a.net_dollars or 0)
     meta = dict(a.meta or {})
     meta.update({"exit_premium": round(exit_bid, 4),
                  "option_return_pct": round(opt_ret, 2),
-                 "net_dollars": round(net_d, 2), "win": opt_ret > 0,
+                 "net_return_pct": float(a.net_pct or 0),
+                 "net_dollars": round(net_d, 2), "win": net_d > 0,
                  "exit_reason": "agente"})
     a.meta = meta
-    a.save(update_fields=["status", "exit_ts", "exit_reason", "exit_premium",
-                          "net_pct", "net_dollars", "meta", "updated_at"])
+    a.save(update_fields=["meta", "updated_at"])
     return {"alert_id": alert_id, "closed": True,
             "option_return_pct": round(opt_ret, 2), "net_dollars": round(net_d, 2)}
 
@@ -1489,6 +1993,11 @@ def reinforce_position(ctx, alert_id: int, confirmation: str):
                               status=Alert.Status.PENDING)
     except Alert.DoesNotExist:
         return {"error": "posicion no encontrada o ya cerrada"}
+    if a.academy_strategy:
+        return {
+            "error": "refuerzo no permitido para Plan 10",
+            "strategy": a.academy_strategy,
+        }
     if not a.occ_symbol or not a.entry_ask:
         return {"error": "posicion sin contrato de opcion asociado"}
 
@@ -1532,8 +2041,10 @@ def reinforce_position(ctx, alert_id: int, confirmation: str):
     add_cost = round(add_ask * 100 * n, 2)
     orig_cost = float(meta.get("cost") or entry_ask * 100 * n)
     cfg = getattr(settings, "POWERTRADEAI", {})
-    max_risk = float(cfg.get("PAPER_ACCOUNT", 10000)) * \
-        float(cfg.get("RISK_PCT_PER_TRADE", 2.0)) / 100.0
+    max_risk = (
+        float(cfg.get("ACCOUNT_SIZE", cfg.get("PAPER_ACCOUNT", 10000)))
+        * float(cfg.get("RISK_PCT_PER_TRADE", 2.0)) / 100.0
+    )
     if orig_cost + add_cost > max_risk:
         return {"error": f"reforzar (+${add_cost:.0f}) llevaria el riesgo del trade "
                          f"a ${orig_cost + add_cost:.0f}, por encima del maximo "
@@ -1571,9 +2082,9 @@ def reinforce_position(ctx, alert_id: int, confirmation: str):
 
 @skill(
     "get_my_track_record",
-    "Tu expediente real: como te fue con las alertas que YA lanzaste y se "
-    "cerraron (acierto direccional del subyacente). Consultalo para ser honesto "
-    "contigo mismo y ajustar tu exigencia. Opcional filtrar por activo.",
+    "Historial Investep v2: resultado neto de las opciones que ya cerraste. "
+    "Sirve para auditar comportamiento, no para modificar reglas o umbrales. "
+    "Opcional filtrar por activo.",
     {
         "type": "object",
         "properties": {
@@ -1583,8 +2094,9 @@ def reinforce_position(ctx, alert_id: int, confirmation: str):
 )
 def get_my_track_record(ctx, symbol: str | None = None):
     from ..models import Alert
-    qs = Alert.objects.filter(source=_alert_source(ctx),
-                              status=Alert.Status.CLOSED)
+    qs = Alert.objects.filter(
+        source=_alert_source(ctx), status=Alert.Status.CLOSED,
+        evaluation_version="investep_v2")
     if symbol:
         qs = qs.filter(symbol=symbol.upper())
     as_of = ctx.get("as_of")
@@ -1700,7 +2212,7 @@ def cancel_price_trigger(ctx, trigger_id: int):
 
 @skill(
     "get_notes",
-    "Lee tus notas previas por tema, para no perder tus propias ideas y reglas.",
+    "Lee observaciones previas por tema. Son contexto, no reglas academicas.",
     {
         "type": "object",
         "properties": {

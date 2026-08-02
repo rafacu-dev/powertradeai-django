@@ -19,7 +19,14 @@ from datetime import date, datetime, timezone
 import pytest
 from django.test import Client, override_settings
 
-from powerTradeAi_djangoApp.models import Alert, ApiKey, Strategy
+from powerTradeAi_djangoApp.models import (
+    AgentRun,
+    Alert,
+    ApiKey,
+    ReplayRun,
+    ScanRun,
+    Strategy,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -97,3 +104,93 @@ def test_el_throttle_del_anfitrion_no_bloquea_al_worker(alerta):
     headers = {"HTTP_AUTHORIZATION": f"Api-Key {raw}"}
     for _ in range(3):
         assert Client().get("/api/alerts/", **headers).status_code == 200
+
+
+def test_transcript_exige_scope_y_redacta_secretos():
+    run = AgentRun.objects.create(
+        status=AgentRun.Status.DONE,
+        goal="usa DEEPSEEK_API_KEY=sk-abcdefghijklmnop",
+        summary="token=supersecreto",
+        transcript=[{
+            "role": "tool",
+            "args": {"api_key": "secreto", "symbol": "TSLA"},
+            "result": {
+                "authorization": "Bearer secreto",
+                "detail": "Authorization: Bearer sk-abcdefghijklmnop",
+            },
+        }],
+    )
+    _, read_raw = ApiKey.generate("lectura")
+    read_headers = {"HTTP_AUTHORIZATION": f"Api-Key {read_raw}"}
+    listing = Client().get("/api/agent-runs/", **read_headers)
+    assert listing.status_code == 200
+    payload = listing.json()
+    listed = (payload["results"] if isinstance(payload, dict) else payload)[0]
+    assert "sk-" not in listed["goal"]
+    assert "supersecreto" not in listed["summary"]
+    assert Client().get(
+        f"/api/agent-runs/{run.id}/", **read_headers).status_code == 403
+
+    _, transcript_raw = ApiKey.generate("auditoria", scopes=["transcript"])
+    response = Client().get(
+        f"/api/agent-runs/{run.id}/",
+        HTTP_AUTHORIZATION=f"Api-Key {transcript_raw}",
+    )
+    assert response.status_code == 200
+    step = response.json()["transcript"][0]
+    assert step["args"]["api_key"] == "[REDACTED]"
+    assert step["args"]["symbol"] == "TSLA"
+    assert step["result"]["authorization"] == "[REDACTED]"
+    assert "sk-" not in step["result"]["detail"]
+
+
+def test_replay_exige_scope_separado():
+    _, read_raw = ApiKey.generate("lectura")
+    assert Client().post(
+        "/api/replay/", data={}, content_type="application/json",
+        HTTP_AUTHORIZATION=f"Api-Key {read_raw}",
+    ).status_code == 403
+
+    _, replay_raw = ApiKey.generate("replay", scopes=["replay"])
+    response = Client().post(
+        "/api/replay/", data={}, content_type="application/json",
+        HTTP_AUTHORIZATION=f"Api-Key {replay_raw}",
+    )
+    assert response.status_code == 400
+
+    empty_strategy = Client().post(
+        "/api/replay/",
+        data={
+            "desde": "2026-07-06",
+            "hasta": "2026-07-06",
+            "strategy": [],
+        },
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Api-Key {replay_raw}",
+    )
+    assert empty_strategy.status_code == 400
+
+
+def test_alert_meta_tambien_redacta_secretos(alerta):
+    Alert.objects.update(meta={
+        "deepseek_api_key": "sk-abcdefghijklmnop",
+        "detail": "token=supersecreto",
+    })
+    _, raw = ApiKey.generate("lectura")
+    response = Client().get(
+        "/api/alerts/", HTTP_AUTHORIZATION=f"Api-Key {raw}")
+    payload = response.json()
+    row = (payload["results"] if isinstance(payload, dict) else payload)[0]
+    assert row["meta"]["deepseek_api_key"] == "[REDACTED]"
+    assert "supersecreto" not in row["meta"]["detail"]
+
+
+def test_auditorias_paginadas_permiten_recuperar_un_registro():
+    scan = ScanRun.objects.create(ok=True)
+    replay = ReplayRun.objects.create(session_date=date(2026, 7, 17))
+    _, raw = ApiKey.generate("lectura")
+    headers = {"HTTP_AUTHORIZATION": f"Api-Key {raw}"}
+
+    assert Client().get(f"/api/scans/{scan.id}/", **headers).status_code == 200
+    assert Client().get(
+        f"/api/replay-runs/{replay.id}/", **headers).status_code == 200

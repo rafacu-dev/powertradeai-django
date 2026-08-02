@@ -1,65 +1,148 @@
-# powerTradeAi_djangoApp
+# PowerTradeAI Django App
 
-App de Django instalable que escanea el mercado en horario RTH, detecta las
-estrategias del proyecto y guarda cada alerta con su compra, su venta y su
-resultado en monto y porcentaje.
+## Proposito
 
-Mientras una alerta no ha terminado, los campos de resultado salen como
-`"pending"` — nunca como `0` ni como `null` disfrazado de dato.
+Esta app aplica el conocimiento recopilado de Investep Academy sin delegar al
+LLM las reglas que deben ser mecanicas. DeepSeek puede consultar datos, proponer
+una estrategia y explicar una tesis; Django decide si la propuesta cumple el
+contrato operativo.
 
-## Estado
+El flujo obligatorio es:
 
-| Pieza | Estado |
-|---|---|
-| Modelos, ApiKey, admin, API de lectura | completo |
-| Motor de escaneo y resolución | completo |
-| SPY ORB-15 (4 reglas) | portada, verificada contra el replay causal de 128 sesiones |
-| TSLA prev-close (5 reglas) | portada, paridad verificada contra `paper/engines/prevclose.py` |
-| BB midpoint (4 reglas) | portada, paridad verificada contra `paper/engines/bb_midpoint.py` |
-| TSLA_W5_STABLE (agresividad) | portada, paridad verificada contra el detector original |
-| 4 reglas `*_TIMESFM` | **pendientes** (requieren el modelo en Render) |
-
-**14 de 18 reglas operativas.**
-
-### La agresividad es distinta al resto
-
-`TSLA_W5_STABLE` no trabaja sobre velas de un minuto: construye barras de **un
-segundo** desde el tape de operaciones. Eso implica dos cosas prácticas:
-
-- El worker debe correr con `--interval 10` o menos. Con 30 s, el límite de
-  antigüedad de señal (15 s) descarta casi todo lo que detecte.
-- Consume mucho más ancho de banda: cada pasada pide 15 minutos de tape.
-
-El gate `confirm10` (el bid debe alcanzar `entry_ask × 1.05` en 10 segundos) se
-reconstruye **a posteriori** con la serie histórica de quotes del contrato — un
-poll de 30 s no puede observar ese máximo en vivo. Si el proveedor no sirve esa
-serie, el gate queda indeterminado y la alerta **no se cierra**: abortar sin
-haber observado el bid sería inventarse el motivo del cierre.
-
-### Solapamiento entre reglas
-
-`TSLA_PREVCLOSE_D1_G300400_P850` y `TSLA_PREVCLOSE_VOL1M` disparan sobre el
-mismo movimiento, igual que `TSLA_FAILED_FADE_CALL_AWAY10` y `..._AWAY25`. Cada
-una genera su propia alerta, así que **un agregado que sume todas las reglas
-cuenta el mismo trade dos veces**. El motor original lo documenta explícitamente
-y advierte que sus `n` no deben sumarse.
-
-## Instalación
-
-```bash
-pip install django djangorestframework thetadata pandas
-# alpaca-py solo si vas a usar ese proveedor
+```text
+consultar_manual
+  -> validate_investep_setup
+     -> InvestepDecision(valid | wait | blocked)
+        -> create_alert(decision_id) solo cuando status=valid
+           -> resolver por target/stop de prima
+              -> P&L neto y auditoria
 ```
 
-En `settings.py` del proyecto anfitrión:
+No se puede llamar `create_alert` con ticker, direccion o nombre de estrategia.
+Esos campos salen de la decision validada. `InvestepDecision` y `Alert` tienen
+relacion uno-a-uno para impedir duplicados y sobrescrituras por reintentos.
+Una restriccion adicional impide consumir la misma señal academica otra vez en
+otra corrida del mismo modo.
+
+## Fidelidad de estrategia
+
+### E01/E02: dos ramas distintas
+
+`OPENING_GAP`
+
+- Temporalidad: 15 minutos.
+- Reloj: intervalo `[09:31, 09:32)` ET.
+- Dato observado: vela 09:30-09:45 en formacion, reconstruida solo con minutos
+  de 1m cuyo cierre ya ocurrio.
+- Contexto: tramo previo contrario o lateral.
+- Confirmacion: gap rompe linea de tendencia y punto medio de Bollinger, las
+  bandas empiezan a abrir y el precio avanza hacia la banda correspondiente.
+- Nunca usa el OHLC final de las 09:45 antes de tiempo.
+
+`INTRADAY_BREAK`
+
+- Temporalidad: 15 minutos.
+- Reloj: desde 09:45 hasta 15:45 ET.
+- Dato observado: vela completa de 15m.
+- Contexto: tendencia previa contraria o lateral.
+- Confirmacion: el cuerpo cierra al otro lado de la linea y del punto medio,
+  con apertura direccional de Bollinger.
+- Una mecha que cruza y cierra de vuelta no confirma.
+
+La frecuencia intradia no se atribuye a la rama de gap. Son estrategias con
+identificadores separados, por ejemplo `TSLA_E01_APERTURA` y
+`TSLA_E01_INTRADIA`.
+
+### Gestion E01/E02
+
+- E01 siempre produce `CALL`; E02 siempre produce `PUT`.
+- Target permitido: 10%-15% sobre la prima.
+- Stop: 20% sobre la prima.
+- No se permite reforzar una posicion asociada a Plan 10.
+- MA40, pisos y techos se usan antes de entrar como terreno disponible, no como
+  una salida estructural obligatoria de E01/E02.
+
+### Estrategias restantes
+
+El manual incluye E03-E10, pero el servidor devuelve
+`NO_DETERMINISTIC_VALIDATOR`. Esto impide que la descripcion verbal del agente
+se convierta en una implementacion accidental. E11/E12 estan marcadas como no
+operables.
+
+## Gates no negociables
+
+Una decision solo llega a `valid` cuando pasan todas estas capas:
+
+1. Estrategia y rama reconocidas.
+2. Simbolo dentro de `INVESTEP_WATCHLIST`.
+3. Consulta del manual en la misma corrida.
+4. Setup mecanico confirmado con datos causales.
+5. Calendario cubierto y sin evento bloqueante.
+6. Terreno suficiente hasta la primera barrera.
+7. Modelo empirico spot-prima con muestra minima.
+8. Target y stop dentro de Plan 10.
+9. Quote de opcion valida, no cruzada, con spread y timestamp aceptables.
+10. Presupuesto y limite de contratos disponibles.
+
+Un dato ausente produce `WAIT` o `BLOCKED`; nunca se convierte en permiso.
+
+### Calendario
+
+`EVENT_CALENDAR_COVERAGE_FROM` y `EVENT_CALENDAR_COVERAGE_UNTIL` declaran el
+intervalo completo del calendario. Si cualquiera falta o la sesion queda fuera,
+el blocker es
+`PENDING_EVENT_CALENDAR`.
+
+`EVENT_CALENDAR_JSON` acepta una lista como:
+
+```json
+[
+  {
+    "type": "earnings",
+    "symbol": "TSLA",
+    "date": "2026-08-05",
+    "confirmed": true,
+    "source": "proveedor-calendario"
+  },
+  {
+    "type": "macro",
+    "symbol": "*",
+    "date": "2026-08-07",
+    "source": "proveedor-calendario"
+  }
+]
+```
+
+La regla bloquea earnings entre 0 y 3 dias y eventos macro el mismo dia.
+
+### Terreno y modelo spot-prima
+
+`assess_terrain` construye barreras con MA20/40/100/200 y pivotes confirmados de
+15m, 1h y diario. La primera barrera en la direccion de la operacion se compara
+contra el movimiento del subyacente necesario para alcanzar el target de prima.
+
+Ese movimiento no se inventa. Debe configurarse con evidencia por simbolo:
+
+```json
+{
+  "TSLA": {
+    "required_move_abs_usd": 0.0,
+    "sample_size": 0,
+    "target_premium_pct": 15,
+    "source": "identificador-del-estudio",
+    "version": "version-del-modelo"
+  }
+}
+```
+
+Los ceros son solo la forma del esquema, no valores utilizables. Con muestra
+menor que `MIN_SPOT_PREMIUM_SAMPLES` o sin movimiento calibrado, el resultado es
+`PENDING_EMPIRICAL_MOVE_MODEL`. El target del modelo debe coincidir con el
+target propuesto; no se reutiliza una calibracion de 15% para una salida de 10%.
+
+## Configuracion
 
 ```python
-INSTALLED_APPS = [
-    ...,
-    "rest_framework",
-    "powerTradeAi_djangoApp",
-]
-
 POWERTRADEAI = {
     "MARKET_DATA_PROVIDER": "hybrid",
     "HYBRID_STOCK_PROVIDER": "alpaca",
@@ -68,332 +151,144 @@ POWERTRADEAI = {
     "ALPACA_API_KEY": os.environ["ALPACA_API_KEY"],
     "ALPACA_API_SECRET": os.environ["ALPACA_SECRET_KEY"],
     "ALPACA_FEED": "iex",
+    "AGENT_LLM": {
+        "BASE_URL": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        "API_KEY": os.environ["DEEPSEEK_API_KEY"],
+        "MODEL": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        "TIMEOUT_SECONDS": 45,
+        "MAX_RETRIES": 1,
+    },
+    "INVESTEP_WATCHLIST": ("TSLA", "SPY", "QQQ"),
+    "ACCOUNT_SIZE": 10_000,
+    "RISK_PCT_PER_TRADE": 2,
+    "MAX_CONTRACTS_PER_TRADE": 5,
+    "MAX_DECISION_AGE_SECONDS": 180,
+    "MAX_OPTION_SPREAD_PCT": 5,
+    "MAX_OPTION_QUOTE_AGE_SECONDS": 30,
+    "MAX_OPTION_QUOTE_FUTURE_SKEW_SECONDS": 2,
+    "MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS": 90,
+    "REQUIRE_OPTION_QUOTE_TIMESTAMP": True,
+    "EVENT_CALENDAR_COVERAGE_FROM": os.getenv(
+        "EVENT_CALENDAR_COVERAGE_FROM"),
+    "EVENT_CALENDAR_COVERAGE_UNTIL": os.getenv(
+        "EVENT_CALENDAR_COVERAGE_UNTIL"),
+    "EVENT_CALENDAR": json.loads(os.getenv("EVENT_CALENDAR_JSON", "[]")),
+    "SPOT_PREMIUM_MODELS": json.loads(
+        os.getenv("SPOT_PREMIUM_MODELS_JSON", "{}")),
+    "MIN_SPOT_PREMIUM_SAMPLES": 20,
 }
 ```
 
-### Por qué híbrido
+Los porcentajes de cuenta, spread, frescura y muestra son controles de
+implementacion configurables. No se presentan como reglas de la academia.
 
-**Porque es la configuración que validó las reglas.** El backtest causal
-[`research/backtest_spy_alerts_thetadata.py`](../research/backtest_spy_alerts_thetadata.py)
-construye el subyacente con `proxy/provider.py` (Alpaca, `FEED="iex"`) y las
-quotes de opciones con `proxy/thetadata.py`. El híbrido reproduce esa misma
-división, así que la app ve los mismos precios que el golden CSV de 128 sesiones.
+## Skills relevantes
 
-Además es lo único que funciona con las suscripciones actuales (ThetaData de
-pago para opciones, sin tier de acciones). Verificado el 19-jul-2026:
+- `consultar_manual`: recupera la seccion y registra la consulta en la corrida.
+- `validate_investep_setup`: crea la decision estructurada y aplica todos los
+  gates.
+- `get_estado_volatilidad`: secuencia de Bollinger con dato crudo, percentil y
+  soporte explicito para la barra en formacion de apertura.
+- `get_trendlines`: auxiliar de lineas con calibracion de software; no valida
+  por si sola una estrategia.
+- `get_event_risk`: estado reproducible del calendario.
+- `get_available_terrain`: barreras y recorrido disponible.
+- `calculate_option_price_range`: compara contratos cercanos y devuelve dos
+  limites de costo por contrato con filas auditables.
+- `create_alert`: consume una decision valida, revalida quote y calcula cantidad
+  en el servidor.
 
-| | Alpaca | ThetaData FREE |
-|---|---|---|
-| Velas del subyacente | ✅ | ❌ requiere tier `value` |
-| Precio actual | ✅ | ❌ requiere tier `value` |
-| Tape de operaciones | ✅ | ❌ requiere tier `standard` |
-| Quote de opción (snapshot) | ✅ | ✅ |
-| **Quote de opción histórica** | ❌ **no existe el endpoint** | ✅ |
+El chat del grafico es de analisis. No recibe skills para crear, ajustar o
+cerrar posiciones.
 
-Sin quotes históricas de opciones no se pueden **resolver** las alertas, así que
-Alpaca solo no basta. La suscripción de opciones de ThetaData cubre justo ese
-hueco. Combinados: 5/5.
+## Persistencia y metricas
 
-**No pases a `MARKET_DATA_PROVIDER="thetadata"` aunque contrates el tier de
-acciones.** Los backtests se hicieron con Alpaca IEX en el subyacente; cambiar
-ese feed dejaría de reproducirlos. El híbrido no es un apaño temporal: es la
-configuración canónica.
+Campos de trazabilidad principales:
 
-En `urls.py`:
+- `manual_hash`, `prompt_version`, `rule_version`.
+- `academy_strategy`, `strategy_branch`, `evaluation_version`.
+- evidencia, validaciones y blockers completos.
+- bid/ask, spread, timestamp y edad de quote.
+- target, stop, costo y contratos decididos por servidor.
 
-```python
-path("api/powertradeai/", include("powerTradeAi_djangoApp.api.urls")),
+El P&L se calcula asi:
+
+```text
+net_dollars = (exit_bid - entry_ask) * 100 * contracts
+              - round_trip_commission * contracts
+net_pct = net_dollars / (entry_ask * 100 * contracts) * 100
 ```
 
-Puesta en marcha:
+Una operacion ganadora es `net_dollars > 0`, no un movimiento bruto positivo.
+Los dashboards y endpoints de performance filtran `investep_v2` por defecto.
+En reconstruccion, ThetaData puede entregar la primera NBBO posterior a la
+decision: hasta 90 segundos se registra como latencia de ejecucion y el reloj de
+la posicion empieza en ese timestamp, no en el cierre de la señal.
 
-```bash
-python manage.py migrate
-python manage.py seed_strategies
-python manage.py create_api_key "dashboard"   # imprime la clave una sola vez
-```
+## Replay
 
-## Probar en local, sin desplegar
-
-No hace falta Render para nada de esto. La librería `thetadata` se conecta a sus
-servidores desde cualquier sitio; Render solo sirve para que el escaneo corra
-solo cuando tu máquina está apagada.
-
-En el repo hay un proyecto Django mínimo en [`dev_project/`](../dev_project/)
-listo para usar:
-
-```bash
-cd dev_project
-export THETADATA_API_KEY=...
-
-python manage.py migrate
-python manage.py seed_strategies
-python manage.py check_provider          # ← empieza por aquí
-python manage.py scan_once --dry-run     # qué dispararía, sin escribir nada
-python manage.py runserver               # admin en /admin/
-
-# Evaluar las reglas contra una sesión pasada real:
-python manage.py scan_once --dry-run --at "2026-07-17 09:50"
-```
-
-`dev_project` carga automáticamente el `.env` de la raíz del repo, y acepta
-`ALPACA_SECRET_KEY` (el nombre que ya usa este proyecto) además de
-`ALPACA_API_SECRET`.
-
-`--at` solo funciona con `--dry-run`: reevaluar el pasado y escribir alertas con
-fecha de hoy corrompería el historial, así que el comando lo rechaza. En modo
-replay la selección de contrato pide quotes del instante de la señal, no
-snapshots en vivo — un contrato ya vencido no tiene snapshot.
-
-Ejemplo real (sesión del 17-jul-2026):
-
-```
-SPY_ORB15_BASE   dispararia  CALL SPY 260717C00743000 ask 2.02 coste $202
-```
-
-rango 09:30-09:44 = 740.80–742.66, umbral CALL 742.8085; la vela de 09:47 cierra
-en 742.71 (no dispara) y la de 09:48 en 743.04 (dispara), señal fechada a las
-09:49 por la convención de cierre de vela.
-
-`check_provider` es el diagnóstico que importa: hace las cinco llamadas que la
-app necesita (velas 1m, historial, precio, quote de opción y tape) y valida que
-lo devuelto tenga la forma esperada — columnas, zona horaria, orden y ausencia
-de duplicados. Si los nombres de columna de ThetaData no coinciden con los alias
-que espera la app, aquí sale con un mensaje claro en vez de reventar a media
-sesión de mercado.
-
-`dev_project/config/settings.py` es también la documentación ejecutable de qué
-hay que copiar a tu proyecto real.
-
-## Reconstruir una sesión pasada
+El endpoint HTTP usa `save=false` por defecto. En ese modo no crea `Alert` ni
+`ReplayRun`. Cuando se pide persistencia, primero calcula toda la sesion y luego
+guarda en una sola transaccion; si una estrategia falla, no reemplaza resultados
+anteriores ni deja una sesion parcial.
 
 ```bash
 python manage.py replay_day --date 2026-07-17
-python manage.py replay_day --date 2026-07-17 --strategy SPY_ORB15_BASE
-python manage.py replay_day --date 2026-07-17 --overwrite
+python manage.py replay_range --desde 2026-07-13 --hasta 2026-07-17
 ```
 
-Recorre el día minuto a minuto como lo habría hecho el worker, deja que cada
-regla decida con la información disponible en ese instante, y resuelve la salida
-con quotes históricas reales del contrato. Una sesión completa tarda ~30 s.
+Las fuentes `live`, `replay`, `agent` y `agent_train` no se agregan juntas. El
+endpoint de performance rechaza `source=all`.
 
-### Las reconstrucciones NO son resultados
+## API
 
-Se guardan con `source="replay"` y quedan separadas de las reales en todo el
-sistema. Un replay:
+Todas las rutas usan `Authorization: Api-Key <clave>` y throttling por clave.
+Metas, tesis, notas, errores, resumenes y transcripts se redactan antes de salir
+por API.
 
-- no sufrió latencia de red ni competencia por el fill;
-- toma la quote del instante teórico, no la que se habría pagado;
-- no modela el rechazo del broker ni la falta de liquidez en ese strike.
-
-Su P&L es un **límite superior optimista**, no un resultado.
-
-Por eso el aislamiento es estructural, no una convención:
-
-| | comportamiento |
-|---|---|
-| `GET /alerts/` | solo `live` por defecto |
-| `GET /alerts/?source=replay` | solo reconstruidas |
-| `GET /alerts/?source=all` | ambas, cada una etiquetada |
-| `GET /strategies/performance/` | solo `live` por defecto |
-| `GET /strategies/performance/?source=all` | **400** — mezclar fuentes en una media da un número sin significado |
-
-El `unique constraint` incluye `source`, así que reconstruir un día ya operado
-en vivo no choca contra la alerta real ni la pisa. Y una alerta creada sin
-especificar fuente nace `live`: un descuido cae del lado seguro.
-
-Fijado en `tests/test_replay_isolation.py`.
-
-### Rango de sesiones
+| Ruta | Scope | Contenido |
+|---|---|---|
+| `GET /alerts/` | `read` | alertas y resultado neto |
+| `GET /strategies/` | `read` | catalogo y estado enabled |
+| `GET /investep-decisions/` | `read` | decisiones, gates y blockers |
+| `GET /replay-runs/` | `read` | auditoria de reconstrucciones |
+| `GET /agent-runs/` | `read` | resumen de corridas |
+| `GET /agent-runs/<id>/` | `transcript` | transcript con secretos redactados |
+| `POST /replay/` | `replay` | calculo o persistencia explicita |
 
 ```bash
-python manage.py replay_range --desde 2026-07-13 --hasta 2026-07-17 \
-    --strategy SPY_ORB15_BASE
+python manage.py create_api_key "dashboard" --scope read
+python manage.py create_api_key "replay" --scope read --scope replay
+python manage.py create_api_key "auditoria" --scope read --scope transcript
 ```
 
-Encadena días hábiles. Una sesión que falle no aborta el rango.
-
-## Verificar fidelidad al backtest
+## Procesos y comandos
 
 ```bash
-python manage.py compare_golden --strategy SPY_ORB15_BASE \
-    --csv research/runs/2026-07-15_spy_orb15_causal_120sessions_trades.csv
+python manage.py migrate
+python manage.py seed_strategies
+python manage.py check_provider
+python manage.py scan_once --dry-run
+python manage.py scan_loop --interval 30
+python manage.py agent_loop --symbols TSLA,SPY,QQQ
 ```
 
-Reconstruye cada sesión **desde velas crudas** y compara contra el artefacto:
-rango de apertura, dirección, vela que disparó y subyacente de entrada. 128
-sesiones en ~15 s.
+`seed_strategies` aplica contencion cada vez: habilita solo E01/E02, ambas
+ramas, para la watchlist configurada. `--preserve-enabled` existe para una
+intervencion consciente; `--disable-new` deja todo apagado.
 
-Esto cierra el hueco que dejaban los golden tests: ellos verifican la aritmética
-de P&L y la selección de strike, pero dan la señal por buena — el CSV trae
-`range_high` y `signal_bar_ts` ya resueltos, no las velas que los produjeron.
+El scanner y el agente deben correr en procesos distintos. `scan_loop --agent`
+no ejecuta DeepSeek y emite una advertencia.
 
-**Resultado actual: 128/128** para `SPY_ORB15_BASE` y `SPY_ORB15_RANGE_INVALID`.
-
-No compara P&L a propósito. Un P&L reconstruido es un límite superior optimista
-y compararlo solo produciría ruido; lo que se verifica es si la app **ve** las
-mismas señales.
-
-### El comparador está verificado por mutación
-
-Un verificador que pasa en vacío es peor que no tenerlo. Se comprobó rompiendo
-la regla a propósito:
-
-| mutación | resultado |
-|---|---|
-| `RANGE_BARS` 15 → 14 | 14/20 (6 divergen) |
-| `BUF` 0.0002 → 0 | 21/40 (19 divergen) |
-| `range_high` renombrado en `meta` | 0/5 — «AUSENTE en la app» |
-
-La tercera es la importante: un campo que desaparece se marca como divergencia,
-no se salta en silencio. Fijado en `tests/test_golden_comparator.py`.
-
-## Uso
+## Pruebas
 
 ```bash
-python manage.py scan_loop --interval 30   # worker: respeta RTH, duerme fuera
-python manage.py scan_once                 # una pasada, escribiendo alertas
-python manage.py scan_once --dry-run       # una pasada sin escribir nada
+python3 dev_project/manage.py check
+python3 dev_project/manage.py makemigrations --check --dry-run
+python3 -m pytest -q
 ```
 
-Si activas `TSLA_W5_STABLE`, baja el intervalo a `--interval 10` o menos: esa
-regla descarta señales de más de 15 segundos.
-
-### Endpoints
-
-Todos requieren `Authorization: Api-Key <clave>`.
-
-| Endpoint | Qué devuelve |
-|---|---|
-| `GET /alerts/` | alertas; filtros `status`, `strategy`, `symbol`, `direction`, `desde`, `hasta` |
-| `GET /alerts/pending/` | solo lo que sigue vivo |
-| `GET /strategies/` | catálogo de reglas |
-| `GET /strategies/performance/` | agregado por regla (**solo alertas cerradas**) |
-| `GET /scans/` | salud del worker |
-
-```bash
-curl -H "Authorization: Api-Key ptai_..." \
-     "https://tu-app.onrender.com/api/powertradeai/alerts/?status=pending"
-```
-
-Forma de una alerta:
-
-```json
-{
-  "strategy_id": "SPY_ORB15_0950",
-  "session_date": "2026-07-15",
-  "direction": "CALL",
-  "status": "pending",
-  "strike": "686.00",
-  "contracts": 2,
-  "compra": {"prima": "1.5000", "bid": "1.4900", "ask": "1.5000", "coste_total": "300.00"},
-  "venta":  {"prima": "pending", "motivo": "pending", "cierre_previsto": "..."},
-  "resultado": {"monto": "pending", "porciento": "pending", "estado": "pending"}
-}
-```
-
-## Convención de P&L
-
-Idéntica al replay causal que validó las reglas:
-
-```
-neto  = (prima_venta - prima_compra) * 100 * contratos - comisión * contratos
-pct   = neto / (prima_compra * 100 * contratos) * 100
-```
-
-Se **compra al ask** y se **vende al bid**. Verificado contra las 128 sesiones de
-`research/runs/2026-07-15_spy_orb15_causal_120sessions_trades.csv`.
-
-## Despliegue en Render
-
-**Guía completa para un proyecto Django existente: [DEPLOY.md](DEPLOY.md).**
-Lo de abajo es el esquema general.
-
-`render.yaml` en la raíz del proyecto anfitrión:
-
-```yaml
-services:
-  - type: web
-    name: powertradeai-api
-    env: python
-    buildCommand: pip install -r requirements.txt && python manage.py migrate
-    startCommand: gunicorn tuproyecto.wsgi:application
-
-  - type: worker
-    name: powertradeai-scanner
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python manage.py scan_loop --interval 30
-
-databases:
-  - name: powertradeai-db
-```
-
-El worker es un proceso vivo, no un cron: mantiene las velas de la sesión en
-memoria y atiende `SIGTERM` para salir limpio en cada redeploy.
-
-**ThetaData funciona en Render** vía la librería Python v3, que se conecta
-directo a sus servidores por HTTPS/gRPC — no necesita el Theta Terminal local.
-Requiere Python 3.12+.
-
-## Añadir una regla
-
-```python
-from powerTradeAi_djangoApp.strategies.base import BaseStrategy, Signal, register
-
-@register
-class MiRegla(BaseStrategy):
-    strategy_id = "SYMBOL_MI_REGLA"
-    name = "Descripción"
-    symbol = "TSLA"
-    rule_version = "mi_regla_v1"
-    default_params = {"hold_minutes": 30}
-
-    def evaluate(self, ctx) -> Signal | None:
-        bars = ctx.causal_bars(1)   # SIEMPRE: solo velas ya cerradas
-        ...
-```
-
-Impórtala en `strategies/__init__.py` y corre `seed_strategies`.
-
-### Lo único que no se negocia
-
-`ctx.causal_bars(n)` devuelve solo las velas cuyo cierre ya es observable. Este
-proyecto ya produjo un veredicto falso por entrar un minuto antes de tiempo. Una
-regla que mire `ctx.bars` directamente puede estar leyendo el futuro.
-
-## Tests
-
-```bash
-python -m pytest powerTradeAi_djangoApp/tests/ -v
-```
-
-- `test_orb15_golden.py` — contra el artefacto causal de 128 sesiones.
-- `test_engine.py` — ciclo completo con proveedor falso, sin red.
-- `test_prevclose_parity.py` — mismos datos al motor original y al port.
-- `test_bb_parity.py` — indicadores valor a valor + regla completa.
-- `test_aggression_parity.py` — barras de 1s, detector y gates de W5.
-
-### Qué cubren y qué no
-
-Cubren: la aritmética de P&L, la selección de strike, la convención de que la
-señal se observa al cierre de la vela, la causalidad, la idempotencia del
-scanner, que sin quote de salida **no se fabrica un resultado**, y que las
-fórmulas duplicadas en `strategies/indicators.py` siguen siendo idénticas a las
-de `core/`.
-
-No cubren: la detección a partir de velas reales descargadas del proveedor. Eso
-exige bajar el histórico y es un test de integración aún por escribir.
-
-Los tests de paridad **exigen que el motor original dispare**: si un escenario
-deja de producir señal, el test falla en vez de pasar en vacío. Esa guardia
-existe porque la primera versión del test de BB pasaba sin comparar nada.
-
-## Hallazgo al portar la regla
-
-`paper/orb15_paper.py:704` calcula el strike base de los PUT como
-`int(spot) + 1`. Cuando el SPY cotiza en un entero exacto eso elige un strike de
-más: en la sesión 2026-01-20 (spot 681.00) el replay causal eligió 681 y esa
-fórmula habría elegido 682. Con `floor`/`ceil` el artefacto reproduce 128/128.
-
-Esta app usa `floor`/`ceil`. **El productor local sigue sin corregir.**
+La suite cubre causalidad de barras, las dos ramas E01/E02, rechazo por mecha,
+calendario, quote fresca, rango de contratos, decisiones por corrida,
+idempotencia, presupuesto serializado, replay atomico, fuentes, scopes y
+redaccion de secretos.

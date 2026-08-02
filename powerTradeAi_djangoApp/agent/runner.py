@@ -15,67 +15,33 @@ from . import llm
 from .skills import SKILLS, tool_schemas
 
 MAX_STEPS = 8
+MAX_TOOL_CALLS_PER_STEP = 8
+MAX_TOOL_CALLS_TOTAL = 24
 
 SYSTEM_PROMPT = """\
-Eres un DAY-TRADER autonomo dentro de PowerTradeAI. Operas opciones intradia \
-sobre acciones e indices de EE.UU. Trabajas la sesion entera, construyendo y \
-refinando una tesis sobre cada activo a lo largo del dia.
+Eres el agente de analisis de PowerTradeAI. Trabajas exclusivamente con el \
+manual de Investep Academy y con datos obtenidos por skills. No inventas \
+umbrales, setups, eventos, quotes ni condiciones.
 
-Tus skills: get_market_data, get_intraday_stats (VWAP, ATR, RSI, rango, gap), \
-get_historical_bars (patrones diarios), scan_bollinger, get_option_quote, \
-backtest_reversion (contrasta una idea contra el historico antes de operarla), \
-get_prior_analysis / save_analysis (tu vision por activo), y \
-get_notes / save_note (tu cuaderno de ideas y reglas).
+Orden obligatorio en cada corrida:
+1. Revisa posiciones abiertas y gestiona primero las que ya existen. Plan 10 no \
+permite refuerzo ni ajustes posteriores. Solo cierra antes si la tesis se invalida.
+2. Consulta contexto y datos con get_daily_briefing, get_market_data, \
+get_estado_volatilidad y get_trendlines. Las medias academicas son \
+MA20/MA40/MA100/MA200.
+3. Nombra una sola estrategia y una rama concreta. Llama consultar_manual con su \
+codigo; recordar el texto no sustituye esa llamada.
+4. Llama validate_investep_setup. El servidor recalcula el setup y devuelve \
+VALID, WAIT o BLOCKED. No discutas ni reinterpretas un bloqueo.
+5. Solo si el resultado es VALID puedes pasar su decision_id a create_alert. El \
+servidor elige direccion, Plan 10 y cantidad; no intentes reemplazarlos.
+6. Si faltan calendario, terreno, modelo spot-prima, quote o validador mecanico, \
+la respuesta correcta es no operar y reportar el blocker exacto.
+7. Guarda analisis y notas como observaciones, nunca como nuevas reglas. Un \
+backtest generico no valida una estrategia academica.
 
-Metodo en cada corrida:
-0. PRIMERO revisa si tienes posiciones abiertas (get_open_positions). Si las \
-hay, gestionalas: si la tesis se rompio o ya lograste el objetivo, cierra \
-(close_position); si va a favor, considera mover el stop a break-even o subir \
-el objetivo (adjust_position); si sigue valida, mantenla. Gestionar lo abierto \
-va antes que buscar nuevas entradas. Cuando una posicion TOQUE su stop, la \
-respuesta normal es CERRAR: en el backtest, reforzar en el stop perdio el 94% \
-de las veces. Solo existe reinforce_position para el caso raro en que la tesis \
-sigue viva con una CONFIRMACION nueva y objetiva (cierre 15m mas alla del nivel, \
-rechazo de VWAP, diagonal que aguanta) — nunca por 'sigo creyendo', y solo si \
-entraste con un starter pequeno que deja sitio al riesgo. En la duda, cierra.
-1. Recupera tu contexto: LO PRIMERO get_daily_briefing (resumen multi-dia: \
-tendencia, vela de ayer, maximo/minimo reciente, cercania al punto medio 1h, y \
-tu historial) para saber que esperar hoy; luego get_prior_analysis, get_notes y \
-get_my_track_record del activo. No empieces de cero; continua tu razonamiento \
-anterior y se honesto con como te ha ido (si tus PUTs van mal, se mas exigente \
-con ellos). Al CERRAR la sesion, guarda con save_note en el tema \
-"diario_<SYMBOL>" una linea con lo esencial del dia (tendencia, niveles que se \
-respetaron, que operaste y la leccion), para que manana tengas el "dia anterior".
-2. Lee el estado actual: get_intraday_stats, get_market_data y get_trendlines \
-(lineas de tendencia diagonales y niveles de soporte/resistencia). Fijate si el \
-precio respeta una tendencia clara (p.ej. resistencia bajista): opera A FAVOR \
-de la estructura o en rupturas/rechazos confirmados de esas lineas. Mira el \
-historico si necesitas contexto.
-3. Antes de operar una idea, VALIDALA: usa backtest_reversion u otra evidencia; \
-no operes por corazonada.
-4. Razona en voz alta, paso a paso: que ves, como encaja con tu tesis previa, \
-que esperas que pase y por que.
-5. Guarda tu vision con save_analysis y anota aprendizajes con save_note.
-6. Fija niveles de vigilancia con set_price_trigger: los precios donde quieres \
-que te despierten (soportes, resistencias, rupturas). No tienes que estar \
-mirando: el sistema te llamara cuando el precio los toque. Revisa los que ya \
-tienes con list_price_triggers y limpia los que sobren con cancel_price_trigger.
-7. Para operar, OPERAS OPCIONES REALES. Cuando tengas una tesis clara:
-   a. Mira la cadena con get_option_chain (CALL para alcista, PUT para bajista): \
-compara strikes y su prima. A menos DTE, mas theta (decae rapido); mas OTM = \
-mas barato pero menos probable. Elige el contrato segun tu tesis.
-   b. Mira get_account y DIMENSIONA: cuantos contratos comprar sin arriesgar \
-mas del maximo por operacion (en una opcion comprada, el maximo que pierdes es \
-la prima pagada).
-   c. Lanza create_alert con symbol, direction, strike, dte, contracts, y \
-target_pct/stop_pct SOBRE LA PRIMA de la opcion (p.ej. target 30%, stop 20%): \
-asi el objetivo es ganancia real y el stop corta el theta. NO uses % del activo \
-para el riesgo: una opcion se mueve mucho mas que el subyacente.
-Solo opera con tesis clara y buen momento; mas vale esperar que forzar. Un buen \
-trade tiene el riesgo definido de antemano y el theta a favor o controlado.
-
-Se disciplinado y prudente: proteges capital. Cuando termines, resume en una \
-frase que decidiste y por que."""
+Separa siempre REGLA_ACADEMIA, IMPLEMENTACION, EVIDENCIA y \
+PENDIENTE_CALIBRACION. Resume la decision y la condicion que podria cambiarla."""
 
 
 def _system_prompt() -> str:
@@ -109,7 +75,18 @@ def _execute_loop(ctx, messages: list[dict], transcript: list[dict]) -> str:
     concluye o se agotan los pasos. Rellena ``transcript`` y devuelve el texto
     final del modelo."""
     tools = tool_schemas()
+    # El chat de grafico es de analisis: no posee herramientas que alteren el
+    # estado de posiciones. El refuerzo tampoco pertenece a Plan 10 y no se
+    # ofrece al modelo en ninguna modalidad.
+    denied = {"reinforce_position", "backtest_reversion", "adjust_position"}
+    if ctx.get("channel") == "chat":
+        denied.update({"create_alert", "adjust_position", "close_position"})
+    tools = [
+        item for item in tools
+        if item["function"]["name"] not in denied
+    ]
     summary = ""
+    executed_calls = 0
     for _ in range(MAX_STEPS):
         msg = llm.chat(messages, tools=tools)
         messages.append(_msg_to_dict(msg))
@@ -121,20 +98,36 @@ def _execute_loop(ctx, messages: list[dict], transcript: list[dict]) -> str:
             summary = msg.content or ""
             break
 
-        for tc in tool_calls:
+        for index, tc in enumerate(tool_calls):
             name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
+            over_limit = (
+                index >= MAX_TOOL_CALLS_PER_STEP
+                or executed_calls >= MAX_TOOL_CALLS_TOTAL
+            )
+            if name in denied:
                 args = {}
-            sk = SKILLS.get(name)
-            if sk is None:
-                result = {"error": f"skill desconocida: {name}"}
+                result = {"error": f"skill no permitida en canal {ctx.get('channel')}"}
+            elif over_limit:
+                args = {}
+                result = {
+                    "error": "limite de llamadas a skills alcanzado",
+                    "max_per_step": MAX_TOOL_CALLS_PER_STEP,
+                    "max_total": MAX_TOOL_CALLS_TOTAL,
+                }
             else:
                 try:
-                    result = sk.func(ctx, **args)
-                except Exception as exc:  # noqa: BLE001
-                    result = {"error": f"{type(exc).__name__}: {exc}"}
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                sk = SKILLS.get(name)
+                if sk is None:
+                    result = {"error": f"skill desconocida: {name}"}
+                else:
+                    try:
+                        result = sk.func(ctx, **args)
+                    except Exception as exc:  # noqa: BLE001
+                        result = {"error": f"{type(exc).__name__}: {exc}"}
+                executed_calls += 1
             transcript.append({
                 "role": "tool", "tool": name, "args": args, "result": result,
             })
@@ -153,12 +146,14 @@ def run_agent(goal: str, symbols: list[str] | None = None,
     Las skills solo veran datos hasta ese instante."""
     from ..models import AgentRun
 
-    symbols = symbols or []
+    if not symbols:
+        from .decision import configured_watchlist
+        symbols = list(configured_watchlist())
     run = AgentRun.objects.create(
         trigger=trigger, status=AgentRun.Status.RUNNING,
         model_name=llm.model_name(), symbols=symbols, goal=goal,
     )
-    ctx = {"run": run, "as_of": as_of}
+    ctx = {"run": run, "as_of": as_of, "channel": "agent"}
     transcript: list[dict] = []
     user = goal
     if symbols:
@@ -184,18 +179,10 @@ def run_agent(goal: str, symbols: list[str] | None = None,
 
 
 CHAT_SYSTEM_PROMPT = """\
-Eres el analista de day-trading de PowerTradeAI conversando con el usuario en \
-vivo, mientras el mira el grafico. Respondes sobre el activo indicado.
-
-Usa tus skills para fundamentar lo que digas (get_intraday_stats, \
-get_market_data, backtest_reversion, get_prior_analysis, get_open_positions, \
-etc.); no inventes numeros. Si tienes posiciones abiertas puedes gestionarlas \
-(adjust_position, close_position) cuando el usuario lo pida o lo veas claro. Si el usuario te lo pide, puedes fijar niveles de vigilancia \
-(set_price_trigger), guardar analisis o notas, o lanzar una alerta \
-(create_alert) — pero solo si lo pide o si hay una tesis muy clara.
-
-Responde DIRECTO y conciso, en el idioma del usuario, como un colega de mesa: \
-al grano, con el numero o el nivel concreto, sin relleno."""
+Estas conversando con el usuario mientras observa un grafico. Esta modalidad es \
+solo de analisis: puedes consultar datos, validar un setup y guardar notas, pero \
+no crear, ajustar ni cerrar posiciones. Responde directo, en el idioma del \
+usuario, citando datos concretos y blockers del validador."""
 
 
 def chat_agent(symbol: str, message: str, history: list[dict] | None = None):
@@ -206,10 +193,15 @@ def chat_agent(symbol: str, message: str, history: list[dict] | None = None):
         trigger=AgentRun.Trigger.MANUAL, status=AgentRun.Status.RUNNING,
         model_name=llm.model_name(), symbols=[symbol], goal=message,
     )
-    ctx = {"run": run}
+    ctx = {"run": run, "channel": "chat"}
     transcript: list[dict] = []
-    messages = [{"role": "system",
-                 "content": CHAT_SYSTEM_PROMPT + f"\n\nActivo en pantalla: {symbol}."}]
+    messages = [{
+        "role": "system",
+        "content": (
+            _system_prompt() + "\n\n" + CHAT_SYSTEM_PROMPT
+            + f"\n\nActivo en pantalla: {symbol}."
+        ),
+    }]
     for h in (history or [])[-6:]:
         role = h.get("role")
         content = h.get("content", "")

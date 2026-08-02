@@ -558,6 +558,12 @@ tbody tr:hover { background: var(--bg); }
 </div>
 
 <script>
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
 const SCAN_STATUS = {
   FUERA_ARRIBA: { cls: 'up',      row: 'hit-up',   label: '▲ Fuera arriba' },
   FUERA_ABAJO:  { cls: 'down',    row: 'hit-down', label: '▼ Fuera abajo' },
@@ -586,7 +592,7 @@ async function loadScanner() {
     let rows = '';
     for (const r of data.rows) {
       if (!r.status || r.status === 'ERROR' || r.status === 'SIN_DATOS') {
-        rows += `<tr><td class="sym">${r.symbol}</td>` +
+        rows += `<tr><td class="sym">${escapeHtml(r.symbol)}</td>` +
           `<td colspan="10" style="text-align:left;color:var(--text-3)">` +
           `${r.status === 'ERROR' ? 'error' : 'sin datos'}</td></tr>`;
         continue;
@@ -619,11 +625,14 @@ async function loadScanner() {
       }
       const scoreTxt = (outside && r.score) ? r.score.toFixed(2) : '&mdash;';
       const rowCls = r.counter_trend ? 'hit-counter' : s.row;
+      const symbol = escapeHtml(r.symbol);
+      const symbolParam = encodeURIComponent(String(r.symbol || ''));
+      const trendLabel = escapeHtml(TREND[r.trend] || r.trend || '');
 
       rows += `<tr class="${rowCls}">` +
-        `<td class="sym"><a href="{% url 'powertradeai:chart' %}?symbol=${r.symbol}">${r.symbol}</a></td>` +
+        `<td class="sym"><a href="{% url 'powertradeai:chart' %}?symbol=${symbolParam}">${symbol}</a></td>` +
         `<td><span class="badge-scan ${s.cls}">${s.label}</span></td>` +
-        `<td><span class="badge-scan ${trendCls}">${TREND[r.trend] || r.trend}</span></td>` +
+        `<td><span class="badge-scan ${trendCls}">${trendLabel}</span></td>` +
         `<td>${tipo}</td>` +
         `<td><strong>${scoreTxt}</strong></td>` +
         `<td>${r.lower.toFixed(2)}</td>` +
@@ -632,7 +641,7 @@ async function loadScanner() {
         `<td>${dot}<strong style="color:${priceColor}">${priceTxt}</strong></td>` +
         `<td>${zTxt}</td>` +
         `<td class="tv-cell"><a class="tv-link" title="Abrir en TradingView" ` +
-          `href="https://www.tradingview.com/chart/?symbol=${r.symbol}" ` +
+          `href="https://www.tradingview.com/chart/?symbol=${symbolParam}" ` +
           `target="_blank" rel="noopener">` +
           `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" ` +
           `stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
@@ -653,8 +662,10 @@ async function loadScanner() {
     status.textContent =
       `${data.date} · ${hits} fuera de banda · ${counter} contra-tendencia`;
   } catch (err) {
-    document.getElementById('scanner-body').innerHTML =
-      `<div class="scanner-empty">Error: ${err.message}</div>`;
+    const errorBox = document.createElement('div');
+    errorBox.className = 'scanner-empty';
+    errorBox.textContent = 'Error: ' + err.message;
+    document.getElementById('scanner-body').replaceChildren(errorBox);
     status.textContent = '';
   } finally {
     btn.disabled = false;
@@ -705,12 +716,12 @@ function runReplay() {
         const cls = net !== null ? (net > 0 ? 'positive' : 'negative') : 'muted';
         const dirCls = a.direction === 'CALL' ? 'badge-call' : 'badge-put';
         tbody.innerHTML += '<tr>' +
-          '<td>' + a.strategy + '</td>' +
-          '<td><span class="badge ' + dirCls + '">' + a.direction + '</span></td>' +
-          '<td class="right">' + (a.strike || '') + '</td>' +
-          '<td class="right">' + (a.entry || '') + '</td>' +
-          '<td class="right">' + (a.exit || '—') + '</td>' +
-          '<td>' + (a.reason || '—') + '</td>' +
+          '<td>' + escapeHtml(a.strategy) + '</td>' +
+          '<td><span class="badge ' + dirCls + '">' + escapeHtml(a.direction) + '</span></td>' +
+          '<td class="right">' + escapeHtml(a.strike || '') + '</td>' +
+          '<td class="right">' + escapeHtml(a.entry || '') + '</td>' +
+          '<td class="right">' + escapeHtml(a.exit || '—') + '</td>' +
+          '<td>' + escapeHtml(a.reason || '—') + '</td>' +
           '<td class="right ' + cls + '">' + (net !== null ? net.toFixed(2) : 'pending') + '</td>' +
           '<td class="right ' + cls + '">' + (pct !== null ? pct.toFixed(2) + '%' : 'pending') + '</td>' +
           '</tr>';
@@ -719,7 +730,8 @@ function runReplay() {
 
     if (data.errors && data.errors.length > 0) {
       data.errors.forEach(e => {
-        tbody.innerHTML += '<tr><td colspan="8" style="color:var(--red);">' + e.rule + ': ' + e.detail + '</td></tr>';
+        tbody.innerHTML += '<tr><td colspan="8" style="color:var(--red);">' +
+          escapeHtml(e.rule) + ': ' + escapeHtml(e.detail) + '</td></tr>';
       });
     }
 

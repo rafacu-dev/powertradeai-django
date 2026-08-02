@@ -1,9 +1,8 @@
 """Piloto automatico del agente.
 
 Encapsula la decision de 'cuando disparar al agente': por periodicidad y por
-evento de movimiento, con rate-limit por activo. Lo usan tanto ``agent_loop``
-(worker dedicado) como ``scan_loop --agent`` (mismo worker que el scanner de
-reglas), para no duplicar la logica.
+evento de movimiento, con rate-limit por activo. Lo usa ``agent_loop`` como
+worker dedicado, separado del scanner determinista.
 """
 from __future__ import annotations
 
@@ -38,6 +37,7 @@ class AgentAutopilot:
         # Activos con posicion abierta del agente vivo (gestionarla mas seguido).
         open_syms = set(Alert.objects.filter(
             source=Alert.Source.AGENT, status=Alert.Status.PENDING,
+            evaluation_version="investep_v2",
         ).values_list("symbol", flat=True))
 
         # Se vigilan los activos base MAS cualquiera con triggers o posicion.
@@ -104,12 +104,14 @@ class AgentAutopilot:
         goal = (
             f"Analiza {sym} ahora mismo (precio {price:.2f}). "
             f"Motivo del disparo: {reason}. Recupera tu contexto previo, lee el "
-            f"estado intradia, valida cualquier idea con backtest, proyecta la "
-            f"direccion mas probable y guarda tu vision. Si sigue teniendo "
-            f"sentido, puedes fijar nuevos niveles de vigilancia. Lanza una "
-            f"alerta solo si hay una tesis clara y accionable.")
+            f"estado intradia y revisa primero posiciones abiertas. Para una "
+            f"entrada nueva, limita la evaluacion a E01/E02, identifica la rama, "
+            f"consulta su manual y ejecuta validate_investep_setup. Solo pasa el "
+            f"decision_id a create_alert si el resultado es VALID; ante WAIT o "
+            f"BLOCKED reporta los blockers y espera. Puedes fijar niveles de "
+            f"vigilancia como observaciones, no como reglas nuevas.")
         try:
-            run = run_agent(goal, symbols=[sym], trigger="scan_loop")
+            run = run_agent(goal, symbols=[sym], trigger="agent_loop")
             events.append((sym, f"@ {price:.2f} ({reason}) -> corrida "
                                 f"#{run.id} [{run.status}] "
                                 f"{run.alerts_created} alerta(s)"))

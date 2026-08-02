@@ -5,16 +5,20 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.db.models import Avg, Count, Q, Sum
-from rest_framework import serializers as drf_serializers, viewsets
+from rest_framework import viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ..auth import ApiKeyAuthentication
+from ..auth import (
+    ApiKeyAuthentication, ApiKeyRateThrottle, ApiKeyScopePermission,
+    ReplayRateThrottle,
+)
 from ..models import (
-    AgentAnalysis, AgentNote, AgentRun, AgentTrigger, Alert, ScanRun, Strategy,
+    AgentAnalysis, AgentNote, AgentRun, AgentTrigger, Alert, InvestepDecision,
+    ReplayRun, ScanRun, Strategy,
 )
 from .serializers import (
     AgentAnalysisSerializer,
@@ -23,15 +27,20 @@ from .serializers import (
     AgentRunSerializer,
     AgentTriggerSerializer,
     AlertSerializer,
+    InvestepDecisionSerializer,
+    ReplayRunSerializer,
     ScanRunSerializer,
     StrategyPerformanceSerializer,
     StrategySerializer,
+    _redact_secrets,
 )
 
 
 class ApiKeyViewSet(viewsets.ReadOnlyModelViewSet):
     authentication_classes = [ApiKeyAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ApiKeyScopePermission]
+    throttle_classes = [ApiKeyRateThrottle]
+    required_scope = "read"
 
 
 class AlertViewSet(ApiKeyViewSet):
@@ -92,6 +101,9 @@ class StrategyViewSet(ApiKeyViewSet):
                 "reconstrucciones produce un P&L sin significado. Pide "
                 "source=live o source=replay.")
         source_filter = Q(alerts__source=source)
+        evaluation_version = params.get("evaluation_version", "investep_v2")
+        if evaluation_version != "all":
+            source_filter &= Q(alerts__evaluation_version=evaluation_version)
 
         closed_filter = source_filter & Q(alerts__status=Alert.Status.CLOSED)
         if (desde := params.get("desde")):
@@ -145,7 +157,29 @@ class ScanRunViewSet(ApiKeyViewSet):
     """Salud del worker: distingue 'no hubo senal' de 'no estaba corriendo'."""
 
     serializer_class = ScanRunSerializer
-    queryset = ScanRun.objects.all()[:200]
+    queryset = ScanRun.objects.all()
+
+
+class ReplayRunViewSet(ApiKeyViewSet):
+    serializer_class = ReplayRunSerializer
+    queryset = ReplayRun.objects.all()
+
+
+class InvestepDecisionViewSet(ApiKeyViewSet):
+    serializer_class = InvestepDecisionSerializer
+
+    def get_queryset(self):
+        qs = InvestepDecision.objects.select_related("agent_run")
+        params = self.request.query_params
+        if (symbol := params.get("symbol")):
+            qs = qs.filter(symbol=symbol.upper())
+        if (strategy := params.get("strategy")):
+            qs = qs.filter(strategy_code=strategy.upper())
+        if (status := params.get("status")):
+            qs = qs.filter(status=status.lower())
+        if (source := params.get("source")):
+            qs = qs.filter(source=source)
+        return qs
 
 
 # ── Auditoria del agente (solo lectura, via API key) ────────────────
@@ -157,6 +191,8 @@ class AgentRunViewSet(ApiKeyViewSet):
     GET /api/powertradeai/agent-runs/?symbol=TSLA&status=done&desde=2026-07-01
     GET /api/powertradeai/agent-runs/<id>/
     """
+
+    required_scope = {"retrieve": "transcript", "list": "read"}
 
     def get_serializer_class(self):
         return (AgentRunSerializer if self.action == "retrieve"
@@ -248,7 +284,9 @@ class ReplayView(APIView):
     """
 
     authentication_classes = [ApiKeyAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ApiKeyScopePermission]
+    throttle_classes = [ReplayRateThrottle]
+    required_scope = "replay"
 
     def post(self, request):
         desde = request.data.get("desde")
@@ -270,7 +308,26 @@ class ReplayView(APIView):
         strategy_ids = request.data.get("strategy")
         if isinstance(strategy_ids, str):
             strategy_ids = [strategy_ids]
-        save = request.data.get("save", True)
+        elif strategy_ids is not None and not isinstance(strategy_ids, list):
+            raise ValidationError({"strategy": "debe ser string o lista"})
+        if strategy_ids is not None:
+            if (not strategy_ids or len(strategy_ids) > 50
+                    or any(not isinstance(item, str) or not item.strip()
+                           or len(item) > 80 for item in strategy_ids)):
+                raise ValidationError({
+                    "strategy": "maximo 50 identificadores no vacios de 80 caracteres",
+                })
+            strategy_ids = list(dict.fromkeys(
+                item.strip() for item in strategy_ids))
+        raw_save = request.data.get("save", False)
+        if isinstance(raw_save, bool):
+            save = raw_save
+        elif isinstance(raw_save, str) and raw_save.lower() in {"true", "1", "yes"}:
+            save = True
+        elif isinstance(raw_save, str) and raw_save.lower() in {"false", "0", "no"}:
+            save = False
+        else:
+            raise ValidationError({"save": "debe ser booleano"})
 
         from ..engine.replay import replay_day
         from ..engine.session import is_trading_day
@@ -282,12 +339,14 @@ class ReplayView(APIView):
         ]
         if not days:
             return Response({"days": [], "summary": {
-                "sesiones": 0, "alertas": 0, "neto": "0.00",
+                "sesiones": 0, "alertas": 0, "errores": 0,
+                "neto": "0.00",
             }})
 
         all_days = []
         total_alerts = 0
         total_closed = 0
+        total_errors = 0
         net = Decimal("0.00")
 
         for day in days:
@@ -296,10 +355,14 @@ class ReplayView(APIView):
                     day,
                     strategy_ids=strategy_ids,
                     overwrite=save,
+                    persist=save,
                 )
             except Exception as exc:
+                total_errors += 1
                 all_days.append({
-                    "date": str(day), "error": str(exc), "alerts": [],
+                    "date": str(day),
+                    "error": _redact_secrets(str(exc)),
+                    "alerts": [],
                 })
                 continue
 
@@ -324,19 +387,21 @@ class ReplayView(APIView):
             net += day_net
             total_alerts += len(result.alerts)
             total_closed += len(result.closed)
+            day_errors = [
+                {
+                    "strategy_id": strategy_id,
+                    "detail": _redact_secrets(detail),
+                }
+                for strategy_id, detail in result.errors
+            ]
+            total_errors += len(day_errors)
 
             all_days.append({
                 "date": str(day),
                 "alerts": day_alerts,
                 "net": str(day_net),
+                "errors": day_errors,
             })
-
-            if not save:
-                Alert.objects.filter(
-                    session_date=day,
-                    source=Alert.Source.REPLAY,
-                    pk__in=[a.pk for a in result.alerts],
-                ).delete()
 
         winners = 0
         for d in all_days:
@@ -353,6 +418,7 @@ class ReplayView(APIView):
                 "cerradas": total_closed,
                 "ganadoras": winners,
                 "perdedoras": total_closed - winners,
+                "errores": total_errors,
                 "neto": str(net),
                 "save": save,
                 "disclaimer": (

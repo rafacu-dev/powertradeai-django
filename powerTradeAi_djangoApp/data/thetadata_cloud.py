@@ -16,7 +16,7 @@ un numero equivocado.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time
 from functools import lru_cache
 
 import pandas as pd
@@ -276,7 +276,17 @@ def _normalize_quote(raw, ts: datetime | None = None) -> Quote | None:
         ask = float(row[ask_col])
     except (TypeError, ValueError):
         return None
-    return Quote(bid=bid, ask=ask, ts=ts or datetime.now(timezone.utc))
+    quote_ts = ts
+    if quote_ts is None:
+        # No se fabrica "ahora": si el snapshot no trae timestamp, el gate de
+        # frescura debe verlo como desconocido y bloquear la operación.
+        try:
+            quote_ts = _series_index(
+                frame.tail(1), pd.Timestamp.now(tz=NY).date()
+            )[0].to_pydatetime()
+        except (MarketDataError, TypeError, ValueError, OverflowError):
+            quote_ts = None
+    return Quote(bid=bid, ask=ask, ts=quote_ts)
 
 
 def _to_ny(moment: datetime) -> pd.Timestamp:

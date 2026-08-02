@@ -11,6 +11,9 @@ from datetime import datetime
 import pandas as pd
 
 from powerTradeAi_djangoApp.agent import skills
+from powerTradeAi_djangoApp.agent.resolver import (
+    _causal_quote_window, _walk_option_premium,
+)
 from powerTradeAi_djangoApp.strategies.base import NY
 
 
@@ -71,3 +74,31 @@ def test_price_asof_no_adelanta_el_1m_en_curso():
     px = skills._price_asof(Fake1m(), "TSLA",
                             datetime(2026, 7, 15, 13, 5, 30, tzinfo=NY))
     assert px == 100.0
+
+
+def test_resolver_recorta_quotes_que_el_proveedor_devuelve_del_futuro():
+    now = pd.Timestamp("2026-07-15 13:05", tz=NY)
+    index = pd.DatetimeIndex([now, now + pd.Timedelta(minutes=1)]).tz_convert("UTC")
+    series = pd.DataFrame(
+        {"bid": [0.95, 0.10], "ask": [1.00, 0.15]}, index=index)
+
+    causal = _causal_quote_window(
+        series, start=now - pd.Timedelta(minutes=1), end=now)
+
+    assert len(causal) == 1
+    assert _walk_option_premium(
+        causal, 1.00, target_pct=15, stop_pct=20,
+        max_spread_pct=5,
+    ) is None
+
+
+def test_resolver_no_ejecuta_stop_con_spread_inutilizable():
+    now = pd.Timestamp("2026-07-15 13:05", tz=NY)
+    series = pd.DataFrame(
+        {"bid": [0.70], "ask": [1.00]},
+        index=pd.DatetimeIndex([now]).tz_convert("UTC"),
+    )
+    assert _walk_option_premium(
+        series, 1.00, target_pct=15, stop_pct=20,
+        max_spread_pct=5,
+    ) is None

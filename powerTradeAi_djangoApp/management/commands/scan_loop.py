@@ -1,7 +1,7 @@
 """Worker de escaneo. Es el proceso que corre en el Background Worker de Render.
 
-Un proceso vivo, no un cron: el estado en memoria (velas de la sesion) se
-reutiliza entre pasadas y no hay cold start en cada vela.
+Un proceso vivo, no un cron: el historial anterior a la sesion se reutiliza
+entre pasadas. Las velas de la sesion se refrescan en cada scan.
 
     python manage.py scan_loop --interval 30
 """
@@ -32,7 +32,8 @@ class Command(BaseCommand):
         parser.add_argument(
             "--ignore-market-hours", action="store_true",
             help="Escanea aunque el mercado este cerrado.")
-        # Piloto automatico del agente EN EL MISMO worker (sin gasto extra).
+        # Argumentos legados: el flag solo emite una advertencia; el agente
+        # corre en su propio worker.
         parser.add_argument(
             "--agent", action="store_true",
             help="Ademas del scanner, corre el agente autonomo en este proceso.")
@@ -50,23 +51,13 @@ class Command(BaseCommand):
             self._report(run)
             return
 
-        # Configurar el piloto del agente si se pidio.
-        autopilot = None
-        provider = None
+        # El LLM no comparte proceso con el scanner: una llamada lenta no puede
+        # retrasar stops ni cierres. Se conserva el flag para fallar de forma
+        # explicable en despliegues antiguos, pero no se ejecuta aqui.
         if options["agent"]:
-            from ...agent.autopilot import AgentAutopilot
-            from ...data import get_provider
-            symbols = [s.strip().upper()
-                       for s in options["agent_symbols"].split(",") if s.strip()]
-            autopilot = AgentAutopilot(
-                symbols, interval=options["agent_interval"],
-                move_threshold=options["agent_move_threshold"],
-                min_gap=options["agent_min_gap"])
-            provider = get_provider()
-            self.stdout.write(self.style.SUCCESS(
-                f"agente ON en este worker · {', '.join(symbols)} · "
-                f"periodico {options['agent_interval']}s · evento "
-                f"{options['agent_move_threshold']}%"))
+            self.stdout.write(self.style.WARNING(
+                "--agent fue desactivado por seguridad; ejecuta agent_loop en "
+                "un worker separado."))
 
         stopping = {"now": False}
 
@@ -81,9 +72,18 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(
             f"scan_loop arrancado (intervalo {interval}s)"))
+        history_cache: dict = {}
+        cache_day = None
 
         while not stopping["now"]:
             if not ignore_hours and not is_market_open():
+                # El cambio a "cerrado" ocurre antes de la siguiente pasada.
+                # Resolver aqui evita dejar una salida de las 16:00 pendiente
+                # hasta la apertura siguiente.
+                try:
+                    resolve_pending(moment=now_ny())
+                except Exception:
+                    log.exception("fallo el resolve con mercado cerrado")
                 wait = min(seconds_until_open(), 900)
                 self.stdout.write(
                     f"[{now_ny():%H:%M:%S}] mercado cerrado; "
@@ -92,30 +92,12 @@ class Command(BaseCommand):
                 self._sleep(wait, stopping)
                 continue
 
-            run = scan_once()
+            current_day = now_ny().date()
+            if cache_day != current_day:
+                history_cache.clear()
+                cache_day = current_day
+            run = scan_once(history_cache=history_cache)
             self._report(run)
-
-            # Resolver las alertas del agente cuyo horizonte ya vencio
-            # (barato: una query filtrada). Las puntua contra precio real.
-            try:
-                from ...agent.resolver import resolve_agent_alerts
-                done = resolve_agent_alerts()
-                if done:
-                    self.stdout.write(
-                        f"[{now_ny():%H:%M:%S}] agente: {len(done)} "
-                        f"alerta(s) resuelta(s)")
-            except Exception:  # noqa: BLE001
-                log.exception("fallo el resolver del agente")
-
-            # Piloto del agente: comparte el proceso. Sus tiradas estan
-            # limitadas por min_gap, asi que solo corre de vez en cuando y no
-            # frena al scanner en cada pasada.
-            if autopilot is not None:
-                try:
-                    for sym, msg in autopilot.tick(provider):
-                        self.stdout.write(f"[{now_ny():%H:%M:%S}] agente {sym} {msg}")
-                except Exception:  # noqa: BLE001
-                    log.exception("fallo el tick del agente")
 
             # Aunque el scan falle, seguimos: un fallo de red no debe tumbar
             # el worker y dejar alertas vivas sin resolver.

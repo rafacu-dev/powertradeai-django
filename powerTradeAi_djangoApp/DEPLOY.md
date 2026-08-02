@@ -1,152 +1,104 @@
-# Desplegar PowerTradeAI en un proyecto Django existente (Render)
+# Despliegue en Render
 
-Guía para instalar la app en **tu** proyecto Django y desplegarlo en Render con
-el worker de escaneo. Configuración de arranque acordada: **las 14 reglas en
-shadow, intervalo de 10 s**.
+Esta guia actualiza un proyecto Django existente al contrato Investep v2. La
+clave de DeepSeek permanece como variable secreta de Render; no se almacena en
+la base ni se expone por API.
 
-## 0. Qué le pasa a tu proyecto
+## 1. Version y dependencias
 
-Antes de instalar nada, lo que esto cambia:
+Fija una version del repositorio, no `main`:
 
-| | impacto |
-|---|---|
-| **Dependencias** | +190 MB (pandas 69, grpcio 40, numpy 32, polars 9, clientes 2). Build más lento y más RAM en reposo. En un plan de 512 MB, vigila el consumo del worker. |
-| **Python** | exige **3.12+** (`thetadata`). Con 3.11 o menos no instala. |
-| **Base de datos** | +4 tablas (`Strategy`, `Alert`, `ApiKey`, `ScanRun`). No toca las tuyas, pero las migraciones corren contra tu base de producción. |
-| **Config DRF** | **ninguno si sigues este documento** — ver más abajo. |
-| **Admin** | aparecen 4 modelos nuevos. |
-| **URLs** | todo bajo el prefijo que elijas. Sin colisión. |
-| **Coste Render** | un Background Worker nuevo (~$7/mes; Render no tiene worker gratuito). |
-| **Aislamiento** | el worker es un proceso aparte: si revienta, tu web sigue sirviendo. |
-
-Crecimiento de datos: como mucho ~14 alertas al día, pero `ScanRun` registra
-cada pasada — con `--interval 10` son ~8.600 filas diarias. Conviene purgarla
-periódicamente (ver el final del documento).
-
-## 0.1 Requisitos
-
-- Python **3.12+** en el proyecto anfitrión (lo exige la librería `thetadata`).
-  En Render: variable `PYTHON_VERSION=3.12.7` o un `runtime.txt`.
-- Postgres (o cualquier base soportada por Django; los `JSONField` de la app
-  funcionan en Postgres y SQLite).
-
-## 1. Llevar la app a tu proyecto
-
-Añade a tu `requirements.txt`:
-
-```
-powertradeai-django @ git+https://github.com/rafacu-dev/powertradeai-django.git@main
-```
-
-O fijando una versión concreta, que es lo recomendable en producción para que un
-push a `main` no cambie las reglas bajo los pies del worker:
-
-```
-powertradeai-django @ git+https://github.com/rafacu-dev/powertradeai-django.git@v1.0.0
-```
-
-**Si el repo es privado**, Render necesita acceso. Dos formas:
-
-- Conectar la cuenta de GitHub en Render y darle acceso al repo (recomendado).
-- O un token en la URL: `git+https://${GITHUB_TOKEN}@github.com/...`, con
-  `GITHUB_TOKEN` como variable de entorno `sync: false`.
-
-La app es autocontenida: modelos, migraciones, auth, motor, API y tests. No
-arrastra nada del proyecto de research.
-
-## 2. Dependencias del proyecto anfitrión
-
-La instalación del paso 1 arrastra sola lo que necesita la app: `django`,
-`djangorestframework`, `pandas`, `numpy`, `thetadata` y `alpaca-py`.
-
-Solo tienes que añadir lo del despliegue en sí:
-
-```
+```text
+powertradeai-django @ git+https://github.com/rafacu-dev/powertradeai-django.git@v1.46.0
 gunicorn
 psycopg[binary]
 ```
 
-**Aviso de conflicto:** si tu proyecto ya usa `alpaca-py`, comprueba la versión.
-La app se apoya en que el paquete NO expone quotes históricas de opciones
-(verificado en 0.43.4) y por eso las pide a ThetaData. Una versión muy distinta
-podría cambiar los nombres de las clases de request que usa
-`data/alpaca_provider.py`.
+La app requiere Python 3.12 o posterior. El conjunto probado se registra en
+`requirements.lock`.
 
-## 3. settings.py
+## 2. Django
 
 ```python
 INSTALLED_APPS = [
-    # ... lo tuyo ...
+    # aplicaciones del proyecto
     "rest_framework",
     "powerTradeAi_djangoApp",
 ]
 
-POWERTRADEAI = {
-    # Configuración canónica: la misma división de feeds que validó las
-    # reglas (Alpaca IEX subyacente + ThetaData opciones). No cambiar a un
-    # proveedor único sin leer el README.
-    "MARKET_DATA_PROVIDER": "hybrid",
-    "HYBRID_STOCK_PROVIDER": "alpaca",
-    "HYBRID_OPTION_PROVIDER": "thetadata",
-    "THETADATA_API_KEY": os.environ["THETADATA_API_KEY"],
-    "ALPACA_API_KEY": os.environ["ALPACA_API_KEY"],
-    "ALPACA_API_SECRET": os.environ["ALPACA_SECRET_KEY"],
-    "ALPACA_FEED": "iex",
-}
-
+urlpatterns = [
+    # rutas del proyecto
+    path("api/powertradeai/", include("powerTradeAi_djangoApp.api.urls")),
+    path("powertradeai/", include("powerTradeAi_djangoApp.urls")),
+]
 ```
 
-### Si tu proyecto YA usa DRF: no toques `REST_FRAMEWORK`
+La app declara autenticacion, permisos y throttling en sus propias vistas. No
+es necesario reemplazar `REST_FRAMEWORK` global del proyecto anfitrion.
 
-**No añadas ningún bloque `REST_FRAMEWORK`.** Es configuración global: pegarlo
-encima de la tuya cambiaría la autenticación y los permisos por defecto de
-*todos* tus endpoints, y podrías cerrar los que hoy son públicos.
+## 3. Variables de Render
 
-No hace falta. Los viewsets de la app declaran su propia
-`authentication_classes` y `permission_classes` por clase, así que funcionan
-sea cual sea tu configuración global. Está verificado en
-`tests/test_drf_independence.py`, incluida la comprobación de que un
-`AllowAny` global **no** abre las alertas.
+Proveedores y LLM:
 
-### Si tu proyecto NO usa DRF
-
-Añade `"rest_framework"` a `INSTALLED_APPS` y, opcionalmente, paginación:
-
-```python
-REST_FRAMEWORK = {
-    "DEFAULT_PAGINATION_CLASS":
-        "rest_framework.pagination.LimitOffsetPagination",
-    "PAGE_SIZE": 100,
-}
+```text
+MARKET_DATA_PROVIDER=hybrid
+HYBRID_STOCK_PROVIDER=alpaca
+HYBRID_OPTION_PROVIDER=thetadata
+ALPACA_API_KEY=<secret>
+ALPACA_SECRET_KEY=<secret>
+ALPACA_FEED=iex
+THETADATA_API_KEY=<secret>
+DEEPSEEK_API_KEY=<secret>
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_TIMEOUT_SECONDS=45
+DEEPSEEK_MAX_RETRIES=1
 ```
 
-La app tolera tenerla o no: sus endpoints devuelven lista plana sin paginación
-y objeto con `results` con ella.
+Universo y limites:
 
-## 4. urls.py
-
-```python
-path("api/powertradeai/", include("powerTradeAi_djangoApp.api.urls")),
+```text
+INVESTEP_WATCHLIST=TSLA,SPY,QQQ
+ACCOUNT_SIZE=10000
+RISK_PCT_PER_TRADE=2
+MAX_CONTRACTS_PER_TRADE=5
+MAX_DECISION_AGE_SECONDS=180
+MAX_OPTION_SPREAD_PCT=5
+MAX_OPTION_QUOTE_AGE_SECONDS=30
+MAX_OPTION_QUOTE_FUTURE_SKEW_SECONDS=2
+MAX_HISTORICAL_OPTION_QUOTE_DELAY_SECONDS=90
+MIN_SPOT_PREMIUM_SAMPLES=20
 ```
 
-## 5. render.yaml (en el repo de tu proyecto)
+Gates de datos:
+
+```text
+EVENT_CALENDAR_COVERAGE_FROM=2026-08-01
+EVENT_CALENDAR_COVERAGE_UNTIL=2026-08-31
+EVENT_CALENDAR_JSON=[...]
+SPOT_PREMIUM_MODELS_JSON={...}
+```
+
+El intervalo `COVERAGE_FROM..COVERAGE_UNTIL` debe estar completo.
+`EVENT_CALENDAR_JSON` debe incluir earnings por ticker y eventos macro con
+`symbol="*"`. `SPOT_PREMIUM_MODELS_JSON` debe contener valores calibrados,
+muestra, fuente y version por ticker. Sin cobertura vigente o sin modelo con
+muestra suficiente, la decision queda bloqueada. Ese comportamiento es
+deliberado.
+
+## 4. Servicios separados
+
+Una llamada a DeepSeek puede tardar decenas de segundos. Por eso el scanner y
+el agente no comparten proceso.
 
 ```yaml
 services:
   - type: web
-    name: tu-proyecto-web
+    name: powertradeai-web
     runtime: python
     buildCommand: pip install -r requirements.txt && python manage.py migrate
     startCommand: gunicorn TU_PROYECTO.wsgi:application
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.7
-      - key: THETADATA_API_KEY
-        sync: false          # se introduce en el dashboard, nunca en el repo
-      - key: ALPACA_API_KEY
-        sync: false
-      - key: ALPACA_SECRET_KEY
-        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: powertradeai-db
@@ -156,9 +108,19 @@ services:
     name: powertradeai-scanner
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python manage.py scan_loop --interval 10
+    startCommand: python manage.py scan_loop --interval 30
     envVars:
-      # mismas variables que el web (PYTHON_VERSION y las tres claves)
+      - key: DATABASE_URL
+        fromDatabase:
+          name: powertradeai-db
+          property: connectionString
+
+  - type: worker
+    name: powertradeai-agent
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python manage.py agent_loop --symbols TSLA,SPY,QQQ
+    envVars:
       - key: DATABASE_URL
         fromDatabase:
           name: powertradeai-db
@@ -166,64 +128,115 @@ services:
 
 databases:
   - name: powertradeai-db
-    plan: basic-256mb
 ```
 
-Sustituye `TU_PROYECTO.wsgi` y ajusta a tu estructura. El worker es un proceso
-vivo: fuera de horario RTH duerme solo, y atiende `SIGTERM` en los redeploys.
+Asigna a los tres servicios las mismas variables de mercado y base de datos. La
+clave de DeepSeek solo es necesaria en web si existe chat y en el worker del
+agente; el scanner no la necesita.
 
-## 6. Puesta en marcha (una vez desplegado)
+No uses `scan_loop --agent`. El flag se conserva para advertir sobre comandos
+antiguos, pero ya no ejecuta el agente dentro del scanner.
 
-Desde el shell del servicio web en Render:
+## 5. Migracion controlada
+
+Ejecuta, en este orden:
 
 ```bash
-python manage.py seed_strategies      # crea las 14 reglas, todas activas
-python manage.py create_api_key "produccion"   # copia la clave: no se repite
-python manage.py check_provider       # 5/5 esperado
+python manage.py migrate
+python manage.py seed_strategies
+python manage.py check_provider
+python manage.py check
 ```
 
-## 7. Checklist de la primera semana
+La migracion v2 es de contencion:
 
-- **Día 1:** `GET /api/powertradeai/scans/` durante horario de mercado — debe
-  haber una pasada cada ~10 s con `ok: true`. Si no hay filas, el worker no
-  corre; si hay filas con `ok: false`, el error viene en el campo `error`.
-- **Cada día:** `GET /alerts/?status=pending` al cierre — no debe quedar nada
-  vivo de días anteriores.
-- **Fin de semana:** `GET /strategies/performance/` — todavía sin conclusiones,
-  solo comprobar que registra.
+- agrega `InvestepDecision`, `ReplayRun`, campos de procedencia, deduplicacion
+  de señales academicas y el lock de presupuesto;
+- da scope `read` a claves antiguas;
+- deshabilita estrategias existentes;
+- marca replays y posiciones del agente legadas incompletas como error.
 
-## Avisos operativos
+Luego `seed_strategies` habilita exclusivamente E01/E02, apertura e intradia,
+para `INVESTEP_WATCHLIST`. El catalogo heredado permanece deshabilitado.
 
-**Límite de peticiones de Alpaca.** `TSLA_W5_STABLE` pide 15 minutos de tape de
-TSLA en cada pasada; a 10 s son ~6 descargas/minuto y es la regla más pesada
-del conjunto. Si aparecen errores 429 en los logs del worker: sube a
-`--interval 20`, o desactiva `TSLA_W5_STABLE` desde el admin (con más de 15-20 s
-de intervalo esa regla igualmente descartaría casi todas sus señales por el
-límite de edad de 15 s — desactivarla es más honesto que dejarla coja).
+Antes de iniciar workers, confirma:
 
-**Las alertas de este worker son shadow.** Registran señal, contrato y P&L
-contrafactual con quotes reales; nadie envía órdenes a ningún broker. El
-objetivo de los próximos 2-3 meses es muestra forward, no operar.
-
-**No mezclar con replays.** Si reconstruyes sesiones pasadas con `replay_day`,
-quedan como `source=replay` y no contaminan los agregados. El endpoint de
-performance rechaza mezclarlas por diseño.
-
-**Purgar `ScanRun`.** Con `--interval 10` son ~8.600 filas al día. Sirve para
-distinguir "no hubo señal" de "el worker estaba caído", pero pasado un mes ya no
-aporta. Un cron mensual en Render, o a mano:
-
-```python
-from datetime import timedelta
-from django.utils import timezone
-from powerTradeAi_djangoApp.models import ScanRun
-
-ScanRun.objects.filter(
-    started_at__lt=timezone.now() - timedelta(days=30), ok=True
-).delete()   # conserva los fallos, que son los que interesa revisar
+```bash
+python manage.py shell -c "\
+from powerTradeAi_djangoApp.models import Strategy; \
+print(list(Strategy.objects.filter(enabled=True).values_list('strategy_id', flat=True)))"
 ```
 
-**Fijar versión en producción.** Usa un tag (`@v1.0.0`), no `@main`. El valor de
-esto es la muestra forward, y solo es limpia si las reglas no cambian mientras
-se genera. Con `@main`, cualquier push altera el comportamiento del worker en el
-siguiente deploy sin dejar rastro de cuándo.
+Con la watchlist por defecto deben aparecer 12 reglas: 3 simbolos por E01/E02
+por dos ramas.
+
+## 6. API keys con menor privilegio
+
+```bash
+python manage.py create_api_key "dashboard" --scope read
+python manage.py create_api_key "replay" --scope read --scope replay
+python manage.py create_api_key "auditoria" --scope read --scope transcript
+```
+
+- `read`: alertas, decisiones, estrategias y auditorias resumidas.
+- `replay`: permite `POST /replay/`.
+- `transcript`: permite detalle completo de una corrida del agente.
+- `*`: solo para administracion excepcional.
+
+El endpoint de replay tiene limite independiente de 2 solicitudes por minuto y
+`save=false` por defecto. Los transcripts redactan claves conocidas incluso con
+el scope correcto.
+
+## 7. Comprobacion previa
+
+```bash
+python manage.py scan_once --dry-run
+python manage.py create_api_key "smoke" --scope read
+```
+
+Verifica por API:
+
+```bash
+curl -H "Authorization: Api-Key $POWERTRADEAI_KEY" \
+  https://TU_HOST/api/powertradeai/strategies/
+
+curl -H "Authorization: Api-Key $POWERTRADEAI_KEY" \
+  https://TU_HOST/api/powertradeai/scans/
+
+curl -H "Authorization: Api-Key $POWERTRADEAI_KEY" \
+  https://TU_HOST/api/powertradeai/investep-decisions/
+```
+
+Una ausencia de alertas no demuestra que el worker este activo. `ScanRun`
+debe registrar pasadas y sus errores aislados por simbolo.
+
+## 8. Monitoreo
+
+Alertas operativas recomendadas:
+
+- `ScanRun.ok=false`.
+- falta de `ScanRun` durante horario de mercado.
+- `AgentRun.status=running` por encima del limite esperado.
+- crecimiento de blockers `PENDING_EVENT_CALENDAR`.
+- crecimiento de blockers `PENDING_EMPIRICAL_MOVE_MODEL`.
+- quotes `OPTION_QUOTE_STALE` o `OPTION_SPREAD_TOO_WIDE`.
+- alertas pendientes despues del cierre.
+- `ReplayRun.status=error`.
+
+Los errores de un ticker no abortan el resto del scanner. Los fallos del agente
+no detienen el resolver de sus posiciones, y ninguna llamada al LLM bloquea el
+scanner determinista.
+
+## 9. Actualizaciones
+
+Antes de cambiar de tag:
+
+1. Ejecuta la suite interna y la de paridad externa.
+2. Revisa nuevas migraciones con `showmigrations` y `sqlmigrate`.
+3. Despliega web y ejecuta migraciones.
+4. Ejecuta `seed_strategies` para reaplicar contencion.
+5. Reinicia scanner y agente.
+6. Confirma `manual_hash`, `prompt_version` y `rule_version` en decisiones
+   nuevas.
+
+Una decision creada con otra version del manual o prompt no puede consumirse.

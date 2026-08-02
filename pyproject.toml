@@ -4,32 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "powertradeai-django"
-version = "1.45.0"
+version = "1.46.0"
 description = "App de Django que escanea el mercado, evalua las estrategias del proyecto y registra alertas con su P&L."
 requires-python = ">=3.12"
-# Combinacion verificada (los 37 tests de este repo + 41 de paridad en
+# Combinacion verificada (los 163 tests de este repo + la suite de paridad en
 # LocalQuantAI corren sobre ella):
 #
 #   Python 3.14.5 | Django 6.0.7 | DRF 3.17.1
-#   pandas 3.0.3  | numpy 2.4.6  | thetadata 1.0.9 | alpaca-py 0.43.4
+#   pandas 3.0.5  | numpy 2.4.6  | thetadata 1.0.9 | alpaca-py 0.43.5
 #
 # Los minimos de abajo son permisivos, no verificados: pandas 2.x deberia
 # funcionar —solo se usan APIs estables— pero nadie lo ha comprobado. Si tu
 # proyecto anfitrion fija pandas 2.x, corre los tests antes de confiar.
 dependencies = [
-    "django>=5.0",
-    "djangorestframework>=3.15",
-    "pandas>=2.0",
-    "numpy>=1.26",
+    "django>=5.0,<6.1",
+    "djangorestframework>=3.15,<3.18",
+    "pandas>=2.0,<3.1",
+    "numpy>=1.26,<2.5",
     # Libreria cloud v3: se conecta directo a los servidores de ThetaData,
     # sin Theta Terminal. Es la que sirve las quotes de opciones.
-    "thetadata>=1.0.9",
+    "thetadata>=1.0.9,<1.1",
     # Subyacente (velas, precio, tape). El feed IEX es el que valido las
     # reglas en research/: no cambiarlo sin releer el README de la app.
-    "alpaca-py>=0.43",
+    "alpaca-py>=0.43,<0.44",
     # Cliente del agente. Compatible con OpenAI: sirve para DeepSeek/Kimi/GLM/
     # Qwen cambiando base_url. Solo se usa si activas el agente.
-    "openai>=1.40",
+    "openai>=1.40,<3",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9,<10",
+    "pytest-django>=4.12,<5",
+    "ruff>=0.12,<1",
 ]
 
 [tool.setuptools]

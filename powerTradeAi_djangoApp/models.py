@@ -86,6 +86,9 @@ class Alert(models.Model):
     source = models.CharField(
         max_length=16, choices=Source.choices,
         default=Source.LIVE, db_index=True)
+    evaluation_version = models.CharField(
+        max_length=32, default="legacy_v1", db_index=True,
+        help_text="Linea base de evaluacion; evita mezclar resultados invalidados.")
 
     signal_ts = models.DateTimeField(help_text="Cierre de la vela que disparo.")
     detected_at = models.DateTimeField(
@@ -136,6 +139,18 @@ class Alert(models.Model):
     agent_run = models.ForeignKey(
         "AgentRun", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="alerts")
+    # Una alerta del agente solo puede nacer de una decision Investep validada.
+    # OneToOne hace que reintentos del LLM sean idempotentes: una decision no se
+    # puede consumir dos veces ni sobrescribir una operacion anterior.
+    investep_decision = models.OneToOneField(
+        "InvestepDecision", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="alert")
+    academy_strategy = models.CharField(
+        max_length=3, blank=True, db_index=True,
+        help_text="Codigo academico E01-E10; vacio para reglas no academicas.")
+    strategy_branch = models.CharField(
+        max_length=32, blank=True,
+        help_text="Rama concreta, por ejemplo OPENING_GAP o INTRADAY_BREAK.")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -157,6 +172,19 @@ class Alert(models.Model):
                 fields=["strategy", "session_date", "direction", "source"],
                 name="uniq_alert_per_strategy_session_direction_source",
                 condition=models.Q(source__in=["live", "replay"]),
+            ),
+            # El LLM puede revalidar el mismo cierre en corridas distintas.
+            # Una señal académica concreta solo se consume una vez por modo.
+            models.UniqueConstraint(
+                fields=[
+                    "source", "symbol", "academy_strategy",
+                    "strategy_branch", "direction", "signal_ts",
+                ],
+                name="uniq_academic_agent_signal",
+                condition=(
+                    models.Q(source__in=["agent", "agent_train"])
+                    & ~models.Q(academy_strategy="")
+                ),
             ),
         ]
 
@@ -222,6 +250,9 @@ class ApiKey(models.Model):
         max_length=PREFIX_LEN, db_index=True,
         help_text="Primeros caracteres, para identificarla sin revelarla.")
     key_hash = models.CharField(max_length=64, unique=True)
+    scopes = models.JSONField(
+        default=list, blank=True,
+        help_text="Permisos de la clave. Vacio conserva acceso legado de lectura.")
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
@@ -243,13 +274,14 @@ class ApiKey(models.Model):
         return f"ptai_{secrets.token_urlsafe(32)}"
 
     @classmethod
-    def generate(cls, name: str) -> tuple["ApiKey", str]:
+    def generate(cls, name: str, scopes: list[str] | None = None) -> tuple["ApiKey", str]:
         """Crea la clave y devuelve (registro, valor_en_claro)."""
         raw = cls.new_raw_key()
         obj = cls.objects.create(
             name=name,
             prefix=raw[: cls.PREFIX_LEN],
             key_hash=cls.hash_key(raw),
+            scopes=scopes or ["read"],
         )
         return obj, raw
 
@@ -290,6 +322,7 @@ class AgentRun(models.Model):
 
     class Trigger(models.TextChoices):
         SCAN_LOOP = "scan_loop", "Scan loop"
+        AGENT_LOOP = "agent_loop", "Agent loop"
         MANUAL = "manual", "Manual"
         TRAINING = "training", "Entrenamiento"
 
@@ -316,6 +349,98 @@ class AgentRun(models.Model):
 
     def __str__(self) -> str:
         return f"agent {self.started_at:%Y-%m-%d %H:%M:%S} [{self.status}]"
+
+
+class InvestepDecision(models.Model):
+    """Decision estructurada y auditable anterior a cualquier alerta del agente.
+
+    El LLM puede proponer una idea, pero este registro solo queda ``valid`` si el
+    servidor comprobo direccion, setup mecanico, datos, eventos, terreno, contrato
+    y riesgo. Los estados bloqueados tambien se conservan para medir por que el
+    agente no opero sin convertir ausencias de datos en reglas inventadas.
+    """
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Borrador"
+        VALID = "valid", "Valida"
+        WAIT = "wait", "Esperar confirmacion"
+        BLOCKED = "blocked", "Bloqueada"
+
+    strategy_code = models.CharField(max_length=3, db_index=True)
+    branch = models.CharField(max_length=32)
+    symbol = models.CharField(max_length=16, db_index=True)
+    direction = models.CharField(max_length=4, choices=Alert.Direction.choices)
+    thesis = models.TextField()
+    status = models.CharField(
+        max_length=8, choices=Status.choices, default=Status.DRAFT,
+        db_index=True)
+    as_of = models.DateTimeField(db_index=True)
+    signal_ts = models.DateTimeField(null=True, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
+    validation = models.JSONField(default=dict, blank=True)
+    blockers = models.JSONField(default=list, blank=True)
+    manual_hash = models.CharField(max_length=64)
+    prompt_version = models.CharField(max_length=40)
+    rule_version = models.CharField(max_length=80, blank=True)
+    source = models.CharField(max_length=16, default=Alert.Source.AGENT)
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    agent_run = models.ForeignKey(
+        AgentRun, on_delete=models.PROTECT, related_name="investep_decisions")
+    validated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-as_of"]
+        indexes = [
+            models.Index(fields=["symbol", "strategy_code", "-as_of"]),
+            models.Index(fields=["status", "source", "-as_of"]),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"{self.strategy_code}/{self.branch} {self.symbol} "
+            f"{self.direction} [{self.status}]"
+        )
+
+
+class ReplayRun(models.Model):
+    """Auditoria de una reconstruccion persistente.
+
+    Los replays de solo calculo no crean este registro: ``save=false`` debe ser
+    estrictamente libre de escrituras.
+    """
+
+    class Status(models.TextChoices):
+        RUNNING = "running", "En curso"
+        DONE = "done", "Terminada"
+        ERROR = "error", "Con errores"
+
+    session_date = models.DateField(db_index=True)
+    status = models.CharField(
+        max_length=8, choices=Status.choices, default=Status.RUNNING,
+        db_index=True)
+    strategy_ids = models.JSONField(default=list, blank=True)
+    overwrite = models.BooleanField(default=False)
+    alerts_created = models.PositiveIntegerField(default=0)
+    errors = models.JSONField(default=list, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+
+    def __str__(self) -> str:
+        return f"replay {self.session_date} [{self.status}]"
+
+
+class RiskControl(models.Model):
+    """Fila estable usada para serializar el presupuesto global del agente."""
+
+    key = models.CharField(max_length=32, primary_key=True, default="agent")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return self.key
 
 
 class AgentAnalysis(models.Model):

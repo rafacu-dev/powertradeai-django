@@ -16,8 +16,6 @@ from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_GET, require_POST
 
-import json
-
 from .models import Alert, Strategy
 
 log = logging.getLogger(__name__)
@@ -27,7 +25,8 @@ log = logging.getLogger(__name__)
 @require_GET
 def dashboard(request):
     params = request.GET
-    source = params.get("source", "all")
+    source = params.get("source", Alert.Source.LIVE)
+    evaluation_version = params.get("evaluation_version", "investep_v2")
     strategy_id = params.get("strategy", "")
     direction = params.get("direction", "")
     desde = params.get("desde", "")
@@ -37,6 +36,8 @@ def dashboard(request):
 
     if source and source != "all":
         qs = qs.filter(source=source)
+    if evaluation_version != "all":
+        qs = qs.filter(evaluation_version=evaluation_version)
     if strategy_id:
         qs = qs.filter(strategy__strategy_id=strategy_id)
     if direction:
@@ -71,6 +72,7 @@ def dashboard(request):
         "strategies": strategies,
         "filters": {
             "source": source,
+            "evaluation_version": evaluation_version,
             "strategy": strategy_id,
             "direction": direction,
             "desde": desde,
@@ -98,7 +100,7 @@ def replay_action(request):
         return JsonResponse({"error": f"{day} no es dia habil"}, status=400)
 
     try:
-        result = replay_day(day, overwrite=True)
+        result = replay_day(day, persist=False)
     except Exception as exc:
         log.exception("replay desde dashboard fallo")
         return JsonResponse({"error": str(exc)}, status=500)
@@ -132,8 +134,6 @@ def replay_action(request):
 @staff_member_required
 @require_GET
 def agent_view(request):
-    from decimal import Decimal
-
     from django.db.models import Avg, Count, Q
 
     from .models import AgentAnalysis, AgentRun, Alert
@@ -146,11 +146,12 @@ def agent_view(request):
     analyses = sorted(latest.values(), key=lambda a: a.created_at, reverse=True)
 
     # Expediente del agente: alertas suyas ya cerradas y puntuadas.
-    agent_alerts = Alert.objects.filter(source=Alert.Source.AGENT)
+    agent_alerts = Alert.objects.filter(
+        source=Alert.Source.AGENT, evaluation_version="investep_v2")
     closed = agent_alerts.filter(status=Alert.Status.CLOSED)
     agg = closed.aggregate(
         n=Count("id"),
-        wins=Count("id", filter=Q(net_pct__gt=0)),
+        wins=Count("id", filter=Q(net_dollars__gt=0)),
         avg_pct=Avg("net_pct"),
     )
     n = agg["n"] or 0
@@ -164,8 +165,10 @@ def agent_view(request):
     recent_alerts = agent_alerts.select_related("strategy").order_by("-signal_ts")[:15]
 
     # Entrenamiento (agent_train): separado del expediente en vivo.
-    train_qs = Alert.objects.filter(source="agent_train", status=Alert.Status.CLOSED)
-    tagg = train_qs.aggregate(n=Count("id"), wins=Count("id", filter=Q(net_pct__gt=0)),
+    train_qs = Alert.objects.filter(
+        source="agent_train", status=Alert.Status.CLOSED,
+        evaluation_version="investep_v2")
+    tagg = train_qs.aggregate(n=Count("id"), wins=Count("id", filter=Q(net_dollars__gt=0)),
                               avg_pct=Avg("net_pct"))
     tn = tagg["n"] or 0
     train = {
@@ -174,7 +177,8 @@ def agent_view(request):
         "avg_pct": round(tagg["avg_pct"], 2) if tagg["avg_pct"] is not None else None,
     }
     train_days = list(
-        Alert.objects.filter(source="agent_train")
+        Alert.objects.filter(
+            source="agent_train", evaluation_version="investep_v2")
         .values_list("session_date", flat=True).distinct().order_by("-session_date")[:10])
 
     return render(request, "powertradeai/agent.html", {
@@ -237,8 +241,9 @@ def agent_launch(request):
     symbols = [s.strip().upper() for s in request.POST.get("symbols", "").split(",")
                if s.strip()]
     goal = request.POST.get("goal", "").strip() or (
-        "Revisa la watchlist, actualiza tu analisis y lanza una alerta solo si "
-        "hay una tesis clara.")
+        "Revisa E01/E02 en la watchlist. Para cada candidato identifica la rama, "
+        "consulta el manual y ejecuta validate_investep_setup. Crea una alerta "
+        "solo con un decision_id VALID; informa WAIT/BLOCKED y sus blockers.")
     try:
         run = run_agent(goal, symbols=symbols, trigger="manual")
     except Exception as exc:
@@ -332,7 +337,7 @@ def chart_data(request):
     ma_lookback = max(days_back + 5, 25)
     htf_start = end - timedelta(days=400)
 
-    MA_PERIODS = [9, 20, 50, 100, 200]
+    MA_PERIODS = [20, 40, 100, 200]
 
     from zoneinfo import ZoneInfo
     NY = ZoneInfo("America/New_York")

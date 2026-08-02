@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from django.contrib import admin, messages
 
-from .models import Alert, ApiKey, ScanRun, Strategy
+from .models import (
+    AgentRun, Alert, ApiKey, InvestepDecision, ReplayRun, ScanRun, Strategy,
+)
 
 
 @admin.register(Strategy)
@@ -17,10 +19,14 @@ class StrategyAdmin(admin.ModelAdmin):
 class AlertAdmin(admin.ModelAdmin):
     list_display = (
         "session_date", "strategy", "direction", "status", "source",
+        "academy_strategy", "strategy_branch", "evaluation_version",
         "strike", "entry_premium", "exit_premium_display",
         "net_dollars_display", "net_pct_display",
     )
-    list_filter = ("source", "status", "symbol", "direction", "strategy")
+    list_filter = (
+        "source", "status", "evaluation_version", "academy_strategy",
+        "symbol", "direction", "strategy",
+    )
     date_hierarchy = "session_date"
     search_fields = ("occ_symbol", "strategy__strategy_id")
     readonly_fields = ("net_dollars", "net_pct", "created_at", "updated_at")
@@ -40,15 +46,17 @@ class AlertAdmin(admin.ModelAdmin):
 
 @admin.register(ApiKey)
 class ApiKeyAdmin(admin.ModelAdmin):
-    list_display = ("name", "prefix", "is_active", "created_at", "last_used_at")
+    list_display = (
+        "name", "prefix", "scopes", "is_active", "created_at", "last_used_at",
+    )
     list_filter = ("is_active",)
     readonly_fields = ("prefix", "key_hash", "created_at", "last_used_at", "revoked_at")
     actions = ["revoke_selected"]
 
     def get_fields(self, request, obj=None):
-        # Al crear solo se pide el nombre: la clave la genera el modelo.
-        return ["name"] if obj is None else [
-            "name", "prefix", "is_active", "created_at", "last_used_at", "revoked_at",
+        return ["name", "scopes"] if obj is None else [
+            "name", "prefix", "scopes", "is_active", "created_at",
+            "last_used_at", "revoked_at",
         ]
 
     def save_model(self, request, obj, form, change):
@@ -60,6 +68,8 @@ class ApiKeyAdmin(admin.ModelAdmin):
         raw = ApiKey.new_raw_key()
         obj.prefix = raw[: ApiKey.PREFIX_LEN]
         obj.key_hash = ApiKey.hash_key(raw)
+        if not obj.scopes:
+            obj.scopes = ["read"]
         super().save_model(request, obj, form, change)
         # Unica vez que la clave en claro es visible. No se persiste.
         self.message_user(
@@ -83,3 +93,34 @@ class ScanRunAdmin(admin.ModelAdmin):
     )
     list_filter = ("ok",)
     readonly_fields = [f.name for f in ScanRun._meta.fields]
+
+
+@admin.register(InvestepDecision)
+class InvestepDecisionAdmin(admin.ModelAdmin):
+    list_display = (
+        "as_of", "symbol", "strategy_code", "branch", "direction", "status",
+        "source", "agent_run",
+    )
+    list_filter = ("status", "source", "strategy_code", "branch", "symbol")
+    search_fields = ("symbol", "thesis", "idempotency_key")
+    readonly_fields = [f.name for f in InvestepDecision._meta.fields]
+
+
+@admin.register(ReplayRun)
+class ReplayRunAdmin(admin.ModelAdmin):
+    list_display = (
+        "session_date", "status", "alerts_created", "overwrite",
+        "started_at", "finished_at",
+    )
+    list_filter = ("status", "overwrite")
+    readonly_fields = [f.name for f in ReplayRun._meta.fields]
+
+
+@admin.register(AgentRun)
+class AgentRunAdmin(admin.ModelAdmin):
+    list_display = (
+        "started_at", "trigger", "status", "model_name", "alerts_created",
+    )
+    list_filter = ("status", "trigger", "model_name")
+    search_fields = ("goal", "summary", "error")
+    readonly_fields = [f.name for f in AgentRun._meta.fields]
