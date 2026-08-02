@@ -195,9 +195,72 @@ def test_bollinger_se_abre_al_sumar_la_barra_en_formacion():
     assert (con_[2] - con_[0]) > (sin_[2] - sin_[0])
 
 
-def test_las_doce_reglas_estan_registradas():
+def test_el_universo_esta_registrado_en_ambas_direcciones():
     from powerTradeAi_djangoApp.strategies.base import all_strategies
+    from powerTradeAi_djangoApp.strategies.e01e02 import UNIVERSO
     ids = set(all_strategies())
-    for sym in ("TSLA", "NVDA", "AAPL", "MSFT", "AMZN", "META"):
+    for sym in UNIVERSO:
         assert f"{sym}_E01_APERTURA" in ids
         assert f"{sym}_E02_APERTURA" in ids
+    assert len(UNIVERSO) >= 25, "el universo debe ser amplio: el limite de tres"
+    " instrumentos es de ancho de banda humano, no del software"
+
+
+def test_descarta_contratos_con_spread_ancho():
+    """Al ampliar el universo entran nombres ilíquidos donde el spread se come
+    cualquier objetivo de 10-15% de prima."""
+    class Q:
+        is_live = True
+        def __init__(self, bid, ask): self.bid, self.ask = bid, ask
+
+    class ProvSpread(_Prov):
+        def __init__(self, h15, bid, ask):
+            super().__init__(h15); self.q = Q(bid, ask)
+        def option_quote(self, occ, at=None):
+            return self.q
+
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 103.0, paso=0.05)
+    regla = _regla("CALL")
+    s = regla.evaluate(_ctx(hoy, _hist15()))
+    assert s is not None
+
+    # spread del 2%: aceptable
+    ctx_ok = ScanContext(provider=ProvSpread(_hist15(), 4.90, 5.00), symbol="TSLA",
+                         session_date=DIA, bars=hoy,
+                         now=datetime.combine(DIA, dtime(9, 31), tzinfo=NY))
+    occ, _, _, _ = regla.select_contract(ctx_ok, s)
+    assert occ is not None
+
+    # spread del 20%: rechazado
+    ctx_mal = ScanContext(provider=ProvSpread(_hist15(), 4.00, 5.00), symbol="TSLA",
+                          session_date=DIA, bars=hoy,
+                          now=datetime.combine(DIA, dtime(9, 31), tzinfo=NY))
+    occ, _, _, _ = regla.select_contract(ctx_mal, s)
+    assert occ is None, "un spread del 20% deberia descartarse"
+
+
+def test_el_historial_se_comparte_entre_reglas_del_mismo_simbolo():
+    """Sin cache compartida, cada regla repite la misma descarga.
+
+    Con dos reglas por simbolo eso duplica las peticiones por pasada, y el coste
+    crece linealmente al ampliar el universo: es lo que impedia pasar de 6
+    simbolos a decenas.
+    """
+    llamadas = {"n": 0}
+
+    class Contador(_Prov):
+        def bars(self, symbol, start, end, tf):
+            llamadas["n"] += 1
+            return super().bars(symbol, start, end, tf)
+
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 103.0, paso=0.05)
+    compartida: dict = {}
+    prov = Contador(_hist15())
+    for _ in range(2):                       # E01 y E02 del mismo simbolo
+        ctx = ScanContext(
+            provider=prov, symbol="TSLA", session_date=DIA,
+            now=datetime.combine(DIA, dtime(9, 31), tzinfo=NY), bars=hoy,
+            _history_cache=compartida.setdefault("TSLA", {}))
+        ctx.history("15m", days=20)
+    assert llamadas["n"] == 1, (
+        f"el historial se pidio {llamadas['n']} veces; deberia ser 1")

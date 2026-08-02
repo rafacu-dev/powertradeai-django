@@ -151,6 +151,12 @@ class E01E02AperturaBase(BaseStrategy):
         "stop_premium_pct": 20.0,     # Plan 10
         "max_dte": 2,
         "strike_depth": 6,
+        # Liquidez: la evaluacion TSLA de la academia observo que "todos los
+        # spreads fueron menores a 5%". Es un dato de sus propias operaciones,
+        # no un umbral inventado. Para un bot es imprescindible: al ampliar el
+        # universo entran nombres con opciones ilíquidas donde el spread se come
+        # cualquier objetivo de 10-15% de prima.
+        "max_spread_pct": 5.0,
     }
 
     def evaluate(self, ctx: ScanContext) -> Signal | None:
@@ -279,8 +285,15 @@ class E01E02AperturaBase(BaseStrategy):
                     q = ctx.provider.option_quote(occ, at=at)
                 except Exception:
                     continue
-                if q is not None and q.is_live:
-                    return occ, exp, float(k), q
+                if q is None or not q.is_live:
+                    continue
+                ask = float(getattr(q, "ask", 0) or 0)
+                bid = float(getattr(q, "bid", 0) or 0)
+                if ask <= 0 or bid <= 0:
+                    continue
+                if (ask - bid) / ask * 100 > float(self.params["max_spread_pct"]):
+                    continue      # opcion demasiado ilíquida para este objetivo
+                return occ, exp, float(k), q
         return None, None, None, None
 
     def check_exit(self, ctx: ScanContext, alert) -> ExitDecision:
@@ -326,9 +339,27 @@ def _crear(sym: str, direccion: str):
         }))
 
 
-# Universo inicial: acciones individuales. El detector de investigacion midio
-# que los indices casi no producen esta rama (QQQ 0 y SPY 3 candidatos en un
-# año, frente a 15 de META): un indice diversificado rara vez abre con gap.
-for _sym in ("TSLA", "NVDA", "AAPL", "MSFT", "AMZN", "META"):
+# Universo. La academia recomienda "hasta tres instrumentos por trimestre", pero
+# eso es ancho de banda HUMANO: cuatro pantallas y conocer cada instrumento. Un
+# worker que escanea cada 10s no tiene ese limite, y ampliar es ademas necesario
+# para poder decidir CUALES son mas rentables: con 6 simbolos salen ~23
+# candidatos por simbolo al año, muy pocos para rankear nada.
+#
+# Criterio: nombres con opciones liquidas (el filtro ``max_spread_pct`` descarta
+# el resto en tiempo de seleccion) y con volatilidad suficiente para producir
+# gaps de apertura. Los indices se incluyen aunque produzcan poco: la medicion
+# dio QQQ 2 y SPY 11 candidatos al año frente a META 23, porque un indice
+# diversificado rara vez abre con gap. Sirven de control.
+UNIVERSO = (
+    # megacaps
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AVGO", "NFLX",
+    # alta beta y volumen de opciones
+    "AMD", "PLTR", "COIN", "MU", "INTC", "UBER", "ORCL", "CRM", "QCOM",
+    "BA", "DIS", "JPM", "XOM", "GS", "CAT",
+    # indices y ETF (control)
+    "SPY", "QQQ", "IWM", "DIA",
+)
+
+for _sym in UNIVERSO:
     _crear(_sym, "CALL")
     _crear(_sym, "PUT")

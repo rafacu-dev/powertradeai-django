@@ -22,12 +22,18 @@ from .session import NY, now_ny, session_close
 log = logging.getLogger(__name__)
 
 
-def _context(provider, symbol: str, day: date, moment: datetime, cache: dict):
+def _context(provider, symbol: str, day: date, moment: datetime, cache: dict,
+             hist_cache: dict | None = None):
     """Un solo fetch de velas por simbolo y pasada.
 
     El fallo tambien se cachea y se re-lanza: si el proveedor esta caido, la
     primera regla del simbolo se lleva el error y las demas no repiten la
     llamada. Sin esto, 14 reglas sobre 3 simbolos disparaban 14 peticiones.
+
+    ``hist_cache`` comparte ademas el HISTORIAL entre las reglas de un mismo
+    simbolo. Sin el, cada regla creaba un ScanContext con su cache vacia y
+    volvia a pedir los mismos dias: con dos reglas por simbolo eran el doble de
+    peticiones por pasada, y crece linealmente al ampliar el universo.
     """
     if symbol not in cache:
         try:
@@ -37,9 +43,12 @@ def _context(provider, symbol: str, day: date, moment: datetime, cache: dict):
     cached = cache[symbol]
     if isinstance(cached, Exception):
         raise cached
+    if hist_cache is None:
+        hist_cache = {}
     return ScanContext(
         provider=provider, symbol=symbol, session_date=day,
         now=moment, bars=cached,
+        _history_cache=hist_cache.setdefault(symbol, {}),
     )
 
 
@@ -60,12 +69,14 @@ def dry_run(moment: datetime | None = None, provider=None) -> list[dict]:
     day = moment.date()
     provider = provider or get_provider()
     bars_cache: dict[str, object] = {}
+    hist_cache: dict[str, dict] = {}
     out: list[dict] = []
 
     for row in Strategy.objects.filter(enabled=True):
         entry: dict = {"strategy_id": row.strategy_id, "symbol": row.symbol}
         try:
-            ctx = _context(provider, row.symbol, day, moment, bars_cache)
+            ctx = _context(provider, row.symbol, day, moment, bars_cache,
+                           hist_cache)
             signal = _build(row).evaluate(ctx)
         except Exception as exc:
             out.append({**entry, "status": "error",
@@ -105,6 +116,7 @@ def scan_once(moment: datetime | None = None, provider=None) -> ScanRun:
     provider = provider or get_provider()
     run = ScanRun.objects.create(started_at=timezone.now())
     bars_cache: dict[str, object] = {}
+    hist_cache: dict[str, dict] = {}
 
     try:
         rows = list(Strategy.objects.filter(enabled=True))
@@ -115,7 +127,8 @@ def scan_once(moment: datetime | None = None, provider=None) -> ScanRun:
 
         created = 0
         for symbol, strategy_rows in by_symbol.items():
-            ctx = _context(provider, symbol, day, moment, bars_cache)
+            ctx = _context(provider, symbol, day, moment, bars_cache,
+                           hist_cache)
             for strategy_row in strategy_rows:
                 if _open_alert(strategy_row, ctx):
                     created += 1
