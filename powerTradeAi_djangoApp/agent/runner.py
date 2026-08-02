@@ -8,11 +8,14 @@ se guarda en ``AgentRun.transcript``: la caja negra queda abierta.
 from __future__ import annotations
 
 import json
+import logging
 
 from django.utils import timezone
 
 from . import llm
 from .skills import SKILLS, tool_schemas
+
+log = logging.getLogger(__name__)
 
 MAX_STEPS = 8
 MAX_TOOL_CALLS_PER_STEP = 8
@@ -138,21 +141,28 @@ def _execute_loop(ctx, messages: list[dict], transcript: list[dict]) -> str:
     return summary
 
 
-def run_agent(goal: str, symbols: list[str] | None = None,
-              trigger: str = "manual", as_of=None):
-    """Corre el agente una vez. Devuelve el ``AgentRun`` con todo registrado.
+def crear_corrida(goal: str, symbols: list[str] | None = None,
+                  trigger: str = "manual"):
+    """Crea el ``AgentRun`` en RUNNING sin ejecutarlo todavia.
 
-    ``as_of`` (opcional): reloj causal para entrenamiento en tiempo pasado.
-    Las skills solo veran datos hasta ese instante."""
+    Separado de la ejecucion para que quien lanza en segundo plano pueda
+    devolver el ``run_id`` de inmediato en vez de un "arrancado" a ciegas."""
     from ..models import AgentRun
 
     if not symbols:
         from .decision import configured_watchlist
         symbols = list(configured_watchlist())
-    run = AgentRun.objects.create(
+    return AgentRun.objects.create(
         trigger=trigger, status=AgentRun.Status.RUNNING,
         model_name=llm.model_name(), symbols=symbols, goal=goal,
     )
+
+
+def ejecutar_corrida(run, as_of=None):
+    """Corre el bucle sobre un ``AgentRun`` ya creado y lo cierra siempre."""
+    from ..models import AgentRun
+
+    goal, symbols = run.goal, list(run.symbols or [])
     ctx = {"run": run, "as_of": as_of, "channel": "agent"}
     transcript: list[dict] = []
     user = goal
@@ -175,6 +185,45 @@ def run_agent(goal: str, symbols: list[str] | None = None,
     finally:
         run.finished_at = timezone.now()
         run.save()
+    return run
+
+
+def run_agent(goal: str, symbols: list[str] | None = None,
+              trigger: str = "manual", as_of=None):
+    """Corre el agente una vez, en el hilo actual. Devuelve el ``AgentRun``.
+
+    ``as_of`` (opcional): reloj causal para entrenamiento en tiempo pasado.
+    Las skills solo veran datos hasta ese instante."""
+    run = crear_corrida(goal, symbols=symbols, trigger=trigger)
+    return ejecutar_corrida(run, as_of=as_of)
+
+
+def lanzar_corrida(goal: str, symbols: list[str] | None = None,
+                   trigger: str = "manual", as_of=None):
+    """Crea la corrida y la ejecuta en un hilo. Devuelve el ``AgentRun`` en
+    RUNNING, sin esperar al modelo.
+
+    Lo usa el panel: un ciclo del agente son varias llamadas al LLM y puede
+    pasar de los minutos, mas que el timeout de gunicorn. Hacerlo sincrono
+    significaba ocupar uno de los dos hilos del web hasta que gunicorn mataba
+    al worker, y ese SIGKILL se saltaba el ``finally`` que cierra la corrida:
+    asi nacio la #1944, colgada en RUNNING para siempre.
+    """
+    import threading
+
+    from django.db import close_old_connections
+
+    run = crear_corrida(goal, symbols=symbols, trigger=trigger)
+
+    def _worker():
+        try:
+            ejecutar_corrida(run, as_of=as_of)
+        except Exception:  # noqa: BLE001
+            log.exception("la corrida en segundo plano fallo")
+        finally:
+            close_old_connections()
+
+    threading.Thread(target=_worker, daemon=True).start()
     return run
 
 

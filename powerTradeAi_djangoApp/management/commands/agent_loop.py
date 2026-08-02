@@ -55,6 +55,8 @@ class Command(BaseCommand):
         # Si el worker anterior murio a mitad de un ciclo, su AgentRun quedo en
         # RUNNING para siempre. Este es el momento natural de cerrarlas: acabamos
         # de arrancar, asi que ninguna corrida propia puede estar en vuelo.
+        # El barrido periodico vive en ``scan_loop``, que es el proceso que si
+        # corre siempre en produccion; esto solo cubre el arranque de este.
         huerfanas = close_stale_runs()
         if huerfanas:
             self.stdout.write(self.style.WARNING(

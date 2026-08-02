@@ -13,8 +13,11 @@ import time
 
 from django.core.management.base import BaseCommand
 
+from ...agent.maintenance import close_stale_runs
 from ...engine.scanner import resolve_pending, scan_once
 from ...engine.session import is_market_open, now_ny, seconds_until_open
+
+LIMPIEZA_CADA_S = 300
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +77,25 @@ class Command(BaseCommand):
             f"scan_loop arrancado (intervalo {interval}s)"))
         history_cache: dict = {}
         cache_day = None
+        proxima_limpieza = 0.0
 
         while not stopping["now"]:
+            # Este proceso NO lanza corridas del agente, y por eso es el unico
+            # que puede barrerlas sin riesgo de matar una propia en vuelo. Vive
+            # aqui porque es el unico proceso que corre siempre en produccion:
+            # el worker arranca ``scan_loop``, no ``agent_loop``, asi que la
+            # limpieza que colgaba de aquel nunca llegaba a ejecutarse.
+            if time.monotonic() >= proxima_limpieza:
+                proxima_limpieza = time.monotonic() + LIMPIEZA_CADA_S
+                try:
+                    n = close_stale_runs()
+                    if n:
+                        self.stdout.write(self.style.WARNING(
+                            f"[{now_ny():%H:%M:%S}] cerradas {n} corrida(s) "
+                            f"colgada(s) del agente"))
+                except Exception:
+                    log.exception("fallo la limpieza de corridas colgadas")
+
             if not ignore_hours and not is_market_open():
                 # El cambio a "cerrado" ocurre antes de la siguiente pasada.
                 # Resolver aqui evita dejar una salida de las 16:00 pendiente

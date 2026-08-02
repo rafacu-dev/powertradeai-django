@@ -236,7 +236,13 @@ def agent_train_launch(request):
 @staff_member_required
 @require_POST
 def agent_launch(request):
-    from .agent.runner import run_agent
+    """Lanza una corrida en un hilo de fondo y devuelve su id al instante.
+
+    Sincrono no era viable: un ciclo del agente son varias llamadas al LLM y
+    puede pasar del timeout de gunicorn. Ese SIGKILL se salta el ``finally``
+    que cierra la corrida —de ahi la #1944 colgada en RUNNING— y ademas ocupaba
+    uno de los dos hilos del servicio web mientras tanto."""
+    from .agent.runner import lanzar_corrida
 
     symbols = [s.strip().upper() for s in request.POST.get("symbols", "").split(",")
                if s.strip()]
@@ -245,14 +251,14 @@ def agent_launch(request):
         "consulta el manual y ejecuta validate_investep_setup. Crea una alerta "
         "solo con un decision_id VALID; informa WAIT/BLOCKED y sus blockers.")
     try:
-        run = run_agent(goal, symbols=symbols, trigger="manual")
+        run = lanzar_corrida(goal, symbols=symbols, trigger="manual")
     except Exception as exc:
         log.exception("agente fallo desde el panel")
         return JsonResponse({"error": str(exc)}, status=500)
     return JsonResponse({
-        "run_id": run.id, "status": run.status,
-        "summary": run.summary, "steps": len(run.transcript),
-        "alerts_created": run.alerts_created, "error": run.error,
+        "run_id": run.id, "status": run.status, "symbols": run.symbols,
+        "note": f"Corrida #{run.id} lanzada en segundo plano. "
+                f"Refresca en un par de minutos para ver el resultado.",
     })
 
 
