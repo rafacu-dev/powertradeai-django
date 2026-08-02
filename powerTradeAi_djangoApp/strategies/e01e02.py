@@ -29,6 +29,8 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
+from datetime import time as _time
+
 from .base import NY, BaseStrategy, ExitDecision, ScanContext, Signal, register
 
 BB_PERIODO, BB_K = 20, 2.0
@@ -53,6 +55,23 @@ GIRO_MEDIO_MODO = "desaceleracion"   # o "estricto"; ver docstring de _giro
 
 def _hora(texto: str):
     return datetime.strptime(texto, "%H:%M").time()
+
+
+def _solo_rth(barras: pd.DataFrame) -> pd.DataFrame:
+    """Descarta premarket y after-hours.
+
+    ``ctx.history`` devuelve las barras CRUDAS: 32 velas de 15m por dia (08:00 a
+    16:45), no las 26 de la sesion regular. Sin filtrar, el "cierre anterior"
+    seria una vela de after-hours y el gap se mediria contra el precio
+    equivocado; ademas las bandas y la escala mezclarian sesiones liquidas con
+    premarket fino. La academia habla de la discontinuidad entre el CIERRE
+    REGULAR y la apertura siguiente.
+    """
+    if barras is None or barras.empty:
+        return barras
+    local = barras.tz_convert(NY)
+    mask = ((local.index.time >= _time(9, 30)) & (local.index.time < _time(16, 0)))
+    return barras[mask]
 
 
 def _escala(barras: pd.DataFrame) -> float | None:
@@ -174,7 +193,7 @@ class E01E02AperturaBase(BaseStrategy):
             return None
 
         # historial 15m que termina AYER: nunca mezcla la sesion viva
-        h = ctx.history("15m", days=20)
+        h = _solo_rth(ctx.history("15m", days=20))
         if h is None or h.empty or len(h) < BB_PERIODO + BARRAS_CONTEXTO:
             return None
         cierres = h["close"].to_numpy(float)
@@ -335,7 +354,7 @@ def _crear(sym: str, direccion: str):
             "name": f"{sym} {eid} {nombre} Bollinger 15m (apertura)",
             "symbol": sym,
             "direction": direccion,
-            "rule_version": "e01e02_opening_gap_forming15m_v3",
+            "rule_version": "e01e02_opening_gap_forming15m_v4",
         }))
 
 

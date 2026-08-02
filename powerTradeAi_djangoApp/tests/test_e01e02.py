@@ -5,7 +5,7 @@ Dos errores opuestos, ambos faciles y ambos con resultados plausibles:
   - usar el OHLC final de las 09:45  -> look-ahead
   - exigir que la vela cierre        -> se pierde la rama entera
 """
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -28,11 +28,23 @@ def _min1(inicio_ny, n, precio, paso=0.0):
                          "close": c, "volume": 100}, index=idx)
 
 
-def _hist15(n=40, desde=104.0, hasta=100.0):
-    """Tramo bajista SUAVE que termina AYER (bandas estrechas)."""
-    idx = pd.date_range(pd.Timestamp(datetime(2026, 7, 2, 9, 30), tz=NY)
-                        .tz_convert("UTC"), periods=n, freq="15min")
-    c = np.linspace(desde, hasta, n)
+def _hist15(n=52, desde=104.0, hasta=100.0):
+    """Tramo bajista SUAVE que termina AYER, SOLO en horario regular.
+
+    Importante: 26 velas de 15m por sesion (09:30-16:00) repartidas en varios
+    dias. Generarlas seguidas desde las 09:30 las metia en after-hours, que la
+    regla descarta — igual que hace con los datos reales.
+    """
+    idx = []
+    dia = datetime(2026, 7, 1)
+    while len(idx) < n:
+        base = pd.Timestamp(datetime(dia.year, dia.month, dia.day, 9, 30), tz=NY)
+        for k in range(26):                       # 09:30..15:45
+            if len(idx) < n:
+                idx.append((base + pd.Timedelta(minutes=15 * k)).tz_convert("UTC"))
+        dia += timedelta(days=1)
+    idx = pd.DatetimeIndex(sorted(idx))
+    c = np.linspace(desde, hasta, len(idx))
     return pd.DataFrame({"open": c, "high": c + 0.05, "low": c - 0.05,
                          "close": c, "volume": 1000}, index=idx)
 
@@ -264,3 +276,33 @@ def test_el_historial_se_comparte_entre_reglas_del_mismo_simbolo():
         ctx.history("15m", days=20)
     assert llamadas["n"] == 1, (
         f"el historial se pidio {llamadas['n']} veces; deberia ser 1")
+
+
+def test_descarta_premarket_y_afterhours_del_historial():
+    """``ctx.history`` devuelve barras CRUDAS: 32 velas de 15m por dia (08:00 a
+    16:45), no las 26 de la sesion regular.
+
+    Sin filtrar, el "cierre anterior" seria una vela de after-hours y el gap se
+    mediria contra el precio equivocado. Es el fallo que invalidó un replay
+    entero: el detector daba 11 señales de QQQ en 3 meses cuando la medicion
+    correcta daba 2 al año.
+    """
+    from powerTradeAi_djangoApp.strategies.e01e02 import _solo_rth
+
+    idx, dia = [], datetime(2026, 7, 1)
+    for _ in range(3):                      # 08:00..16:45 = 36 barras/dia
+        base = pd.Timestamp(datetime(dia.year, dia.month, dia.day, 8, 0), tz=NY)
+        idx += [(base + pd.Timedelta(minutes=15 * k)).tz_convert("UTC")
+                for k in range(36)]
+        dia += timedelta(days=1)
+    idx = pd.DatetimeIndex(sorted(idx))
+    c = np.linspace(100.0, 101.0, len(idx))
+    crudo = pd.DataFrame({"open": c, "high": c, "low": c, "close": c,
+                          "volume": 1}, index=idx)
+
+    limpio = _solo_rth(crudo)
+    horas = {t.strftime("%H:%M") for t in limpio.tz_convert(NY).index.time}
+    assert min(horas) == "09:30"
+    assert max(horas) == "15:45"
+    assert len(limpio) == 26 * 3, f"deberian quedar 26 velas por sesion, hay {len(limpio)/3:.0f}"
+    assert len(limpio) < len(crudo)
