@@ -489,6 +489,60 @@ def consultar_manual(ctx, consulta: str):
     return salida
 
 
+@skill(
+    "get_estado_volatilidad",
+    "Estado de las bandas de Bollinger en la secuencia del manual: CERRADA, "
+    "ABRIENDO_LEVE, CONFIRMADA, EXPUESTO o REGRESO_A_BANDA. Devuelve tambien el "
+    "ancho, la expansion y su PERCENTIL contra la propia historia del simbolo, "
+    "la direccion y el giro del punto medio, y donde esta el precio respecto a "
+    "las bandas. Es el requisito central de E01-E08: usalo antes de operarlas. "
+    "OJO: no aplicar la exigencia de expansion a E09/E10, que explotan "
+    "precisamente una apertura extrema SIN volatilidad.",
+    {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "timeframe": {"type": "string", "enum": ["15m", "1h", "1d"],
+                          "description": "Temporalidad. E01/E02 usan 15m; "
+                                         "E03/E04 usan 1h."},
+        },
+        "required": ["symbol"],
+    },
+)
+def get_estado_volatilidad(ctx, symbol: str, timeframe: str = "15m"):
+    from .volatilidad import evaluar
+
+    provider = _provider()
+    sym = symbol.upper()
+    end = _now(ctx).date()
+    dias = {"15m": 30, "1h": 90, "1d": 400}.get(timeframe, 30)
+    try:
+        bars = _bars_upto(ctx, provider, sym, end - timedelta(days=dias), end,
+                          timeframe)
+    except Exception as exc:
+        return {"symbol": sym, "error": f"{type(exc).__name__}: {exc}"}
+    if bars is None or bars.empty:
+        return {"symbol": sym, "error": "sin datos"}
+
+    # Solo sesion regular: el premarket ensancha las bandas artificialmente y ya
+    # produjo un veredicto falso en este proyecto.
+    from ..strategies.base import solo_rth
+    bars = solo_rth(bars)
+    if bars.empty:
+        return {"symbol": sym, "error": "sin barras de sesion regular"}
+
+    precio = None
+    try:
+        precio = _spot(ctx, provider, sym)
+    except Exception:
+        pass
+    out = evaluar(bars["close"].to_numpy(float), precio)
+    out.update(symbol=sym, timeframe=timeframe,
+               barras_usadas=int(len(bars)),
+               ultima_barra=bars.index[-1].tz_convert(NY).strftime("%Y-%m-%d %H:%M"))
+    return out
+
+
 def _strike_step(spot: float) -> float:
     return 5.0 if spot >= 200 else 2.5 if spot >= 50 else 1.0
 
