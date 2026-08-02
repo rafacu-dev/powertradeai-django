@@ -84,10 +84,11 @@ def es_operable(codigo: str) -> tuple[bool, str]:
     if c in AUTOMATIZADAS:
         return True, ESTRATEGIAS[c]
     if c in ESTRATEGIAS:
-        return False, (
-            f"{c} esta documentada, pero el bot no tiene validador "
-            "determinista: NO_DETERMINISTIC_VALIDATOR"
-        )
+        # Operable en fase de INVESTIGACION: sin validador mecanico el servidor
+        # no confirma el setup, pero bloquearlas significaria no aprender nunca
+        # si sirven. La decision queda marcada JUICIO_AGENTE y se analiza aparte.
+        return True, (f"{ESTRATEGIAS[c]} — sin validador determinista: "
+                      "la decision quedara marcada como JUICIO_AGENTE")
     if c in NO_OPERABLES:
         return False, f"{c} NO es operable por el bot: {NO_OPERABLES[c]}"
     return False, (f"'{codigo}' no es una estrategia del manual. "
@@ -104,10 +105,15 @@ def bloque_prompt() -> str:
         "reglas de estrategias distintas.\n\n"
         "Estrategias documentadas:\n" + "\n".join(lineas) + "\n"
         + "\n".join(no_op) + "\n\n"
-        "Estado de automatizacion: solo E01/E02, ramas OPENING_GAP e "
-        "INTRADAY_BREAK, tienen validador determinista habilitado. E03-E10 "
-        "se pueden estudiar, pero validate_investep_setup las bloquea con "
-        "NO_DETERMINISTIC_VALIDATOR y no se operan.\n\n"
+        "Dos niveles de validacion, y debes saber en cual estas:\n"
+        "  DETERMINISTA (E01/E02, ramas OPENING_GAP e INTRADAY_BREAK): el "
+        "servidor RECALCULA el setup y solo emite decision_id si se cumple.\n"
+        "  JUICIO_AGENTE (E03-E10): el servidor NO puede verificar el setup. "
+        "Son operables porque estamos en investigacion y hay que aprender si "
+        "sirven, pero la unica evidencia sera lo que TU declares haber visto. "
+        "Por eso ahi se exige una tesis mucho mas detallada: condicion por "
+        "condicion, con los niveles concretos que ves. Estas alertas se "
+        "analizan por separado y no se mezclan con las deterministas.\n\n"
         "Antes de operar DEBES llamar a consultar_manual con la estrategia que "
         "crees ver, y comprobar UNA POR UNA sus condiciones y sus "
         "invalidaciones. Si falta cualquier requisito, NO operas: la respuesta "

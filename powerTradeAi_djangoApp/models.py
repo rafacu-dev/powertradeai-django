@@ -366,6 +366,20 @@ class InvestepDecision(models.Model):
         WAIT = "wait", "Esperar confirmacion"
         BLOCKED = "blocked", "Bloqueada"
 
+    class Validacion(models.TextChoices):
+        """Como se confirmo el setup. Separar los dos niveles es lo que hace
+        interpretable la investigacion: si se mezclan, ante un resultado malo no
+        se puede saber si fallo la estrategia o la lectura que el agente hizo
+        de ella."""
+
+        DETERMINISTA = "determinista", "El servidor recalculo el setup"
+        JUICIO_AGENTE = "juicio_agente", "Solo el criterio del agente"
+
+    validacion = models.CharField(
+        max_length=16, choices=Validacion.choices,
+        default=Validacion.DETERMINISTA, db_index=True,
+        help_text="DETERMINISTA solo si existe validador mecanico (E01/E02).")
+
     strategy_code = models.CharField(max_length=3, db_index=True)
     branch = models.CharField(max_length=32)
     symbol = models.CharField(max_length=16, db_index=True)

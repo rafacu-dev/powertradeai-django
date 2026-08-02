@@ -37,10 +37,20 @@ def test_acepta_codigos_validos_con_ruido(codigo):
 
 
 @pytest.mark.parametrize("codigo", [f"E{i:02d}" for i in range(3, 11)])
-def test_documentada_sin_validador_no_es_operable(codigo):
+def test_documentada_sin_validador_es_operable_pero_marcada(codigo):
+    """CAMBIO DE POLITICA (decision del operador, fase de investigacion).
+
+    Antes E03-E10 se bloqueaban con NO_DETERMINISTIC_VALIDATOR. Bloquearlas
+    garantiza que nunca sabremos si sirven, y el agente forma parte de la
+    investigacion. Ahora son operables, pero la decision queda marcada
+    JUICIO_AGENTE para poder analizarlas por separado.
+
+    Lo que NO se relaja: el aviso debe viajar. Si desapareciera, las dos clases
+    de alerta serian indistinguibles y el resultado no se podria interpretar.
+    """
     ok, motivo = investep.es_operable(codigo)
-    assert ok is False
-    assert "NO_DETERMINISTIC_VALIDATOR" in motivo
+    assert ok is True
+    assert "JUICIO_AGENTE" in motivo
 
 
 @pytest.mark.parametrize("codigo", ["", None, "E99", "scalping", "mi corazonada"])
@@ -104,7 +114,8 @@ def test_el_prompt_del_agente_incluye_el_bloque():
     p = _system_prompt()
     assert "MODO INVESTEP" in p
     assert "create_alert" in p
-    assert "solo E01/E02" in p
+    # El prompt ya no dice "solo E01/E02": ahora explica los DOS niveles.
+    assert "DETERMINISTA" in p and "JUICIO_AGENTE" in p
 
 
 def test_el_prompt_no_arrastra_el_manual_entero():

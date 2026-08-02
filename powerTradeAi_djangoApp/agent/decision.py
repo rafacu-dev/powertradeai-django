@@ -95,10 +95,18 @@ def _mechanical_signal(provider, *, symbol: str, code: str, branch: str,
                        now: datetime):
     strategy_id = _strategy_id(symbol, code, branch)
     if strategy_id is None:
+        # E03-E10: documentadas pero sin validador mecanico. En fase de
+        # investigacion el agente SI puede operarlas —si no, nunca sabremos si
+        # sirven— pero el servidor no puede confirmar el setup, asi que la
+        # decision queda marcada como JUICIO_AGENTE y no se mezcla despues con
+        # las deterministas. Los demas gates (evento, terreno, Plan 10,
+        # watchlist) se aplican igual.
         return None, {
-            "status": "BLOCKED",
-            "blocker": "NO_DETERMINISTIC_VALIDATOR",
+            "status": "JUICIO_AGENTE",
+            "motivo": "NO_DETERMINISTIC_VALIDATOR",
             "strategy": code,
+            "aviso": ("El servidor NO ha verificado este setup. La evidencia es "
+                      "lo que el agente declara haber visto."),
         }, ""
     try:
         cls = get_strategy_class(strategy_id)
@@ -154,6 +162,28 @@ def _mechanical_signal(provider, *, symbol: str, code: str, branch: str,
         "features": signal.meta,
         "_signal": signal,
     }, cls.rule_version
+
+
+def _contexto_actual(provider, symbol: str, now: datetime):
+    """ScanContext y precio de la sesion en curso, sin señal mecanica.
+
+    Lo usan las estrategias sin validador: el agente afirma ver el setup en el
+    precio actual, y sobre ese ancla se comprueban los gates que SI son
+    deterministas.
+    """
+    day = now.astimezone(NY).date()
+    try:
+        bars = provider.bars_1m(symbol, day)
+    except Exception:
+        return None, None
+    if bars is None or bars.empty:
+        return None, None
+    ctx = ScanContext(provider=provider, symbol=symbol, session_date=day,
+                      now=now, bars=bars)
+    cerradas = ctx.causal_bars(1)
+    if cerradas.empty:
+        return ctx, None
+    return ctx, float(cerradas["close"].iloc[-1])
 
 
 def _idempotency_payload(*, source: str, symbol: str, code: str, branch: str,
@@ -255,11 +285,17 @@ def validate_setup(
             provider, symbol=sym, code=code, branch=selected_branch, now=now)
     signal = mechanical.pop("_signal", None)
     validation["mechanical_setup"] = mechanical
+    juicio_agente = mechanical["status"] == "JUICIO_AGENTE"
     if mechanical["status"] == "BLOCKED":
         blockers.append({
             "code": mechanical.get("blocker", "MECHANICAL_SETUP_BLOCKED"),
             "layer": "setup",
         })
+    if juicio_agente and len(thesis_text) < 120:
+        # Sin verificacion mecanica, la unica evidencia es lo que el agente
+        # describe: se le exige mas detalle que cuando el servidor comprueba.
+        blockers.append({"code": "THESIS_INSUFICIENTE_SIN_VALIDADOR",
+                         "layer": "evidence"})
 
     event = event_gate(sym, now)
     validation["event"] = event
@@ -270,7 +306,16 @@ def validate_setup(
         })
 
     terrain = {"status": "WAIT", "blocker": "SETUP_NOT_CONFIRMED"}
-    if signal is not None and scan_ctx is not None:
+    if juicio_agente:
+        # No hay señal mecanica que anclar: se evalua el terreno desde el precio
+        # actual, que es lo que el agente dice estar viendo.
+        scan_ctx, spot = _contexto_actual(provider, sym, now)
+        if scan_ctx is not None and spot:
+            terrain = assess_terrain(
+                scan_ctx, direction, float(spot),
+                target_premium_pct=(
+                    target_value if math.isfinite(target_value) else 15.0))
+    elif signal is not None and scan_ctx is not None:
         terrain = assess_terrain(
             scan_ctx, direction, float(signal.underlying),
             target_premium_pct=(
@@ -323,6 +368,8 @@ def validate_setup(
         "manual_hash": manual_hash(),
         "prompt_version": PROMPT_VERSION,
         "rule_version": rule_version,
+        "validacion": (InvestepDecision.Validacion.JUICIO_AGENTE if juicio_agente
+                       else InvestepDecision.Validacion.DETERMINISTA),
         "source": source,
         "agent_run": ctx["run"],
         "validated_at": timezone.now(),
@@ -344,5 +391,12 @@ def public_result(decision: InvestepDecision) -> dict:
         "validation": decision.validation,
         "manual_hash": decision.manual_hash,
         "prompt_version": decision.prompt_version,
+        "validacion": decision.validacion,
+        "aviso_validacion": (
+            "El servidor NO verifico el setup: esta estrategia no tiene "
+            "validador determinista. La evidencia es lo que declaras haber "
+            "visto, y la alerta quedara marcada como tal."
+            if decision.validacion == InvestepDecision.Validacion.JUICIO_AGENTE
+            else "Setup recalculado y confirmado por el servidor."),
         "can_create_alert": decision.status == InvestepDecision.Status.VALID,
     }
