@@ -152,7 +152,11 @@ class E01E02AperturaBase(BaseStrategy):
         # vela de 15m y se dispara en la primera evaluacion que cumpla todo.
         "watch_from": "09:30",
         "watch_until": "09:45",
-        "target_premium_pct": 10.0,   # publicado: 10%-15% sobre la prima
+        # La fuente publica 10%-15%. Se usa 15 porque la mediana de las
+        # salidas por target ya era +15.29%: el escaner comprueba la prima
+        # cada minuto y el nivel se atraviesa, asi que pedir 10 no cerraba
+        # en 10. Ambos valores son regla academica.
+        "target_premium_pct": 15.0,
         "stop_premium_pct": 20.0,     # Plan 10
         "max_dte": 2,
         "strike_depth": 6,
@@ -311,7 +315,7 @@ class E01E02AperturaBase(BaseStrategy):
             return ExitDecision(should_exit=False)
         entrada = float(alert.entry_premium)
         meta = alert.meta or {}
-        tgt = entrada * (1 + float(meta.get("target_premium_pct", 10.0)) / 100)
+        tgt = entrada * (1 + float(meta.get("target_premium_pct", 15.0)) / 100)
         stp = entrada * (1 - float(meta.get("stop_premium_pct", 20.0)) / 100)
         occ = alert.occ_symbol
         if not occ:
@@ -340,7 +344,7 @@ def _crear(sym: str, direccion: str):
             "name": f"{sym} {eid} {nombre} Bollinger 15m (apertura)",
             "symbol": sym,
             "direction": direccion,
-            "rule_version": "e01e02_opening_gap_forming15m_v4",
+            "rule_version": "e01e02_opening_gap_forming15m_t15_v5",
         }))
 
 

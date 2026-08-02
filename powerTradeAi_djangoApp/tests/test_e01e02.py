@@ -306,3 +306,25 @@ def test_descarta_premarket_y_afterhours_del_historial():
     assert max(horas) == "15:45"
     assert len(limpio) == 26 * 3, f"deberian quedar 26 velas por sesion, hay {len(limpio)/3:.0f}"
     assert len(limpio) < len(crudo)
+
+
+def test_gestion_publicada_target_15_stop_20():
+    """La fuente publica 10%-15% sobre la PRIMA y el Plan 10 aporta el -20%.
+
+    Se usa 15 porque el escaner comprueba la prima cada minuto y el nivel se
+    atraviesa: pidiendo 10 la mediana de salida real ya era +15.29%.
+    """
+    from powerTradeAi_djangoApp.strategies.base import all_strategies
+    c = all_strategies()["TSLA_E01_APERTURA"]
+    assert c.default_params["target_premium_pct"] == 15.0
+    assert c.default_params["stop_premium_pct"] == 20.0
+
+
+def test_el_target_y_el_stop_se_miden_sobre_la_prima_no_el_subyacente():
+    """Error de unidades que ya invalidó un backtest: 2%-10% del SUBYACENTE no
+    es lo mismo que de la PRIMA, y mezclarlos no representa el Plan 10."""
+    import inspect
+    from powerTradeAi_djangoApp.strategies import e01e02
+    fuente = inspect.getsource(e01e02.E01E02AperturaBase.check_exit)
+    assert "entry_premium" in fuente
+    assert "bid" in fuente
