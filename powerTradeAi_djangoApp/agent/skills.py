@@ -452,6 +452,43 @@ def get_index_internals(ctx, symbol: str, group: str = "sectores"):
     }
 
 
+@skill(
+    "consultar_manual",
+    "Consulta el manual operativo de Investep Academy: la regla exacta de una "
+    "estrategia (E01-E12), sus condiciones, invalidaciones y gestion, o "
+    "cualquier concepto (volatilidad, terreno, linea de tendencia, planes). "
+    "OBLIGATORIO antes de operar: hay que verificar la regla, no recordarla.",
+    {
+        "type": "object",
+        "properties": {
+            "consulta": {
+                "type": "string",
+                "description": "Codigo de estrategia (E01) o tema "
+                               "(volatilidad, terreno, punto medio, plan 10).",
+            },
+        },
+        "required": ["consulta"],
+    },
+)
+def consultar_manual(ctx, consulta: str):
+    from . import investep
+
+    c = (consulta or "").strip()
+    res = investep.buscar(c)
+    salida = {"consulta": c, "secciones": res}
+    cod = c.upper()
+    if cod in investep.ESTRATEGIAS:
+        salida["operable"] = True
+        salida["nombre"] = investep.ESTRATEGIAS[cod]
+    elif cod in investep.NO_OPERABLES:
+        salida["operable"] = False
+        salida["motivo"] = investep.NO_OPERABLES[cod]
+    if not res:
+        salida["aviso"] = ("Sin coincidencias. Si el manual no lo documenta, NO "
+                           "inventes la regla: descarta la operacion.")
+    return salida
+
+
 def _strike_step(spot: float) -> float:
     return 5.0 if spot >= 200 else 2.5 if spot >= 50 else 1.0
 
@@ -630,7 +667,14 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
         "properties": {
             "symbol": {"type": "string"},
             "direction": {"type": "string", "enum": ["CALL", "PUT"]},
-            "thesis": {"type": "string", "description": "Por que operas, en breve."},
+            "estrategia": {
+                "type": "string",
+                "description": "Codigo del manual que estas aplicando (E01-E10). "
+                               "Obligatorio: sin el, la alerta se rechaza.",
+            },
+            "thesis": {"type": "string",
+                       "description": "Que condicion CONCRETA de la estrategia "
+                                      "se cumplio. No vale una corazonada."},
             "strike": {"type": "number",
                        "description": "Strike del contrato (si lo omites, ATM)."},
             "dte": {"type": "integer",
@@ -653,12 +697,22 @@ def save_analysis(ctx, symbol: str, analysis: str, stance: str = "neutral"):
     },
 )
 def create_alert(ctx, symbol: str, direction: str, thesis: str,
+                 estrategia: str | None = None,
                  strike: float | None = None, dte: int = 0, contracts: int = 1,
                  horizon_minutes: int = 120,
                  target_pct: float | None = None,
                  stop_pct: float | None = None):
     from ..data import occ_symbol
     from ..models import Alert, Strategy
+    from . import investep
+
+    # PUERTA DURA del modo Investep. Sin esto, "opera solo las del manual" seria
+    # una sugerencia del prompt que el modelo puede saltarse en cualquier
+    # llamada; aqui no hay alerta si no declara una estrategia documentada.
+    ok, detalle = investep.es_operable(estrategia or "")
+    if not ok:
+        return {"error": "estrategia no valida", "detalle": detalle,
+                "operables": sorted(investep.ESTRATEGIAS)}
     sym = symbol.upper()
     provider = _provider()
     try:

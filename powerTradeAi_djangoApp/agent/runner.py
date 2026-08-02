@@ -78,6 +78,18 @@ Se disciplinado y prudente: proteges capital. Cuando termines, resume en una \
 frase que decidiste y por que."""
 
 
+def _system_prompt() -> str:
+    """El prompt base mas la restriccion del manual Investep.
+
+    Se compone en tiempo de ejecucion para que el catalogo de estrategias sea la
+    unica fuente: si manana se documenta una nueva o se retira otra, el prompt
+    cambia solo. El manual completo NO va aqui (son ~12.000 tokens): el agente
+    lo consulta por partes con ``consultar_manual``.
+    """
+    from .investep import bloque_prompt
+    return SYSTEM_PROMPT + "\n\n" + bloque_prompt()
+
+
 def _msg_to_dict(msg) -> dict:
     d = {"role": "assistant", "content": msg.content or ""}
     if getattr(msg, "tool_calls", None):
@@ -152,7 +164,7 @@ def run_agent(goal: str, symbols: list[str] | None = None,
     if symbols:
         user += f"\n\nActivos a revisar: {', '.join(symbols)}."
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": user},
     ]
     try:

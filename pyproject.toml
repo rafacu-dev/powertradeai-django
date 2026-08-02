@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "powertradeai-django"
-version = "1.43.0"
+version = "1.44.0"
 description = "App de Django que escanea el mercado, evalua las estrategias del proyecto y registra alertas con su P&L."
 requires-python = ">=3.12"
 # Combinacion verificada (los 37 tests de este repo + 41 de paridad en
@@ -37,4 +37,6 @@ dependencies = [
 packages = { find = { include = ["powerTradeAi_djangoApp*"] } }
 
 [tool.setuptools.package-data]
-"powerTradeAi_djangoApp" = ["templates/**/*.html"]
+# El manual de Investep es un .md dentro del paquete: sin declararlo aqui,
+# el wheel no lo incluye y el agente arranca en Render sin su regla.
+"powerTradeAi_djangoApp" = ["templates/**/*.html", "agent/manual/*.md"]
