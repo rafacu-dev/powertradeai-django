@@ -11,7 +11,9 @@ from .base import (  # noqa: F401
     get_strategy_class,
     register,
 )
-from . import aggression, bb_midpoint, orb15, prevclose  # noqa: F401  (auto-registro)
+from . import (  # noqa: F401  (auto-registro)
+    aggression, bb_midpoint, e01e02, orb15, prevclose,
+)
 
 __all__ = [
     "BaseStrategy", "ExitDecision", "ScanContext", "Signal",

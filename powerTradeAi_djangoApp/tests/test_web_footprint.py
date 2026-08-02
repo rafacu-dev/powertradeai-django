@@ -72,4 +72,5 @@ def test_el_motor_si_carga_las_reglas_cuando_hace_falta():
         from powerTradeAi_djangoApp.strategies import all_strategies
         print(len(all_strategies()))
     """)
-    assert out == "15", f"el catalogo deberia tener 15 reglas, tiene {out}"
+    # 15 reglas originales + 12 de E01/E02 apertura (6 simbolos x 2 direcciones)
+    assert out == "27", f"el catalogo deberia tener 27 reglas, tiene {out}"

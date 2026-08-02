@@ -85,6 +85,40 @@ class ScanContext:
             minutes=timeframe_minutes)
         return self.bars[self.bars.index <= cutoff]
 
+    def forming_bar(self, timeframe_minutes: int = 15) -> dict | None:
+        """OHLC PARCIAL de la vela en curso, con los minutos YA observados.
+
+        EXCEPCION DELIBERADA a la convencion de "solo velas cerradas". La rama
+        de apertura de E01/E02 se decide a las 09:31 sobre la vela 09:30-09:45
+        EN FORMACION: es literalmente lo que el operador tiene en pantalla, y la
+        academia valida ahi. Esperar al cierre de las 09:45 no es "mas
+        conservador": es otra cosa, y fue lo que hizo que un detector previo
+        perdiera esa rama entera.
+
+        Sigue siendo causal: solo usa barras de 1m cuyo cierre ya ocurrio en
+        ``now``. Lo prohibido es el OHLC final de la vela, que aun no existe.
+
+        Devuelve None si la vela en curso no tiene ningun minuto cerrado. Usar
+        esto exige justificacion de la fuente; para todo lo demas estan
+        ``causal_bars`` y ``resample``.
+        """
+        cerradas = self.causal_bars(1)
+        if cerradas.empty:
+            return None
+        inicio = pd.Timestamp(self.now).tz_convert("UTC").floor(
+            pd.Timedelta(minutes=timeframe_minutes))
+        parcial = cerradas[cerradas.index >= inicio]
+        if parcial.empty:
+            return None
+        return {
+            "start": inicio,
+            "open": float(parcial["open"].iloc[0]),
+            "high": float(parcial["high"].max()),
+            "low": float(parcial["low"].min()),
+            "close": float(parcial["close"].iloc[-1]),
+            "minutes": int(len(parcial)),
+        }
+
     def bars_between(self, start_et: str, end_et: str) -> pd.DataFrame:
         """Barras de la sesion entre dos horas ET, ambas inclusive por inicio."""
         if self.bars.empty:
