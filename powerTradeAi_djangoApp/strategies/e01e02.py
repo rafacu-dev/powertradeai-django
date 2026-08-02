@@ -43,6 +43,10 @@ GAP_MINIMO_PCT = 0.0        # sin minimo publicado
 GIRO_MEDIO_MODO = "desaceleracion"   # o "estricto"; ver docstring de _giro
 
 
+def _hora(texto: str):
+    return datetime.strptime(texto, "%H:%M").time()
+
+
 def _bollinger(cierres: np.ndarray):
     if len(cierres) < BB_PERIODO:
         return None
@@ -111,7 +115,13 @@ class E01E02AperturaBase(BaseStrategy):
 
     direction: str = "CALL"
     default_params = {
-        "decision_et": "09:31",
+        # La academia NO fija una hora: la señal se toma CUANDO SE CUMPLE la
+        # condicion, que puede ser a las 09:30:20, 09:31 o 09:32. El "09:31" de
+        # los ejemplos (PLTR, Apple) es una OBSERVACION de cuando ocurrio en esos
+        # casos, no un requisito. Aqui se vigila toda la formacion de la primera
+        # vela de 15m y se dispara en la primera evaluacion que cumpla todo.
+        "watch_from": "09:30",
+        "watch_until": "09:45",
         "target_premium_pct": 10.0,   # publicado: 10%-15% sobre la prima
         "stop_premium_pct": 20.0,     # Plan 10
         "max_dte": 2,
@@ -119,11 +129,15 @@ class E01E02AperturaBase(BaseStrategy):
     }
 
     def evaluate(self, ctx: ScanContext) -> Signal | None:
-        hh, mm = (int(x) for x in self.params["decision_et"].split(":"))
-        ahora = ctx.et(ctx.now)
-        if (ahora.hour, ahora.minute) != (hh, mm):
+        ahora = ctx.et(ctx.now).time()
+        if not (_hora(self.params["watch_from"]) <= ahora
+                <= _hora(self.params["watch_until"])):
             return None
 
+        # LIMITE DE DATOS: la barra en formacion se reconstruye con velas de 1m,
+        # asi que el estado mas temprano observable es tras cerrar el minuto de
+        # las 09:30. Un cumplimiento a las 09:30:20 no es visible con este
+        # proveedor; haria falta tape de ticks. No es la regla, es el dato.
         formando = ctx.forming_bar(15)
         if formando is None or formando["minutes"] < 1:
             return None
@@ -273,7 +287,7 @@ def _crear(sym: str, direccion: str):
             "name": f"{sym} {eid} {nombre} Bollinger 15m (apertura)",
             "symbol": sym,
             "direction": direccion,
-            "rule_version": f"e01e02_opening_gap_forming15m_v1",
+            "rule_version": "e01e02_opening_gap_forming15m_v2",
         }))
 
 

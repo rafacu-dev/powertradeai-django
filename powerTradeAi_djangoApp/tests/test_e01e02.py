@@ -114,9 +114,29 @@ def test_e01_no_dispara_si_ya_venia_alcista():
     assert _regla("CALL").evaluate(_ctx(hoy, alcista)) is None
 
 
-def test_solo_evalua_en_la_hora_de_decision():
-    hoy = _min1(datetime(2026, 7, 6, 9, 30), 30, 103.0, paso=0.05)
-    assert _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=45)) is None
+def test_dispara_cuando_se_cumple_no_a_una_hora_fija():
+    """La academia NO fija hora: la señal se toma cuando se cumple la condicion.
+    El 09:31 de los ejemplos es una observacion, no un requisito."""
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 103.0, paso=0.05)
+    for minuto in (31, 33, 36, 40, 44):
+        s = _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=minuto))
+        assert s is not None, f"deberia poder disparar a las 09:{minuto}"
+
+
+def test_fuera_de_la_ventana_de_apertura_no_evalua():
+    """Pasada la formacion de la primera vela de 15m, esta rama se cierra:
+    a partir de ahi corresponde la rama intradia, que es otra cosa."""
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 40, 103.0, paso=0.05)
+    assert _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=50)) is None
+
+
+def test_el_gap_se_mide_siempre_contra_la_apertura():
+    """Dispare a las 09:31 o a las 09:44, el gap es el mismo hecho: la
+    discontinuidad entre el cierre regular anterior y la apertura."""
+    hoy = _min1(datetime(2026, 7, 6, 9, 30), 15, 103.0, paso=0.05)
+    a = _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=31))
+    b = _regla("CALL").evaluate(_ctx(hoy, _hist15(), minuto=44))
+    assert a.meta["gap_pct"] == b.meta["gap_pct"]
 
 
 # --- causalidad (lo critico) ----------------------------------------------
