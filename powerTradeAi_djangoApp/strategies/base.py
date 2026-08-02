@@ -8,7 +8,7 @@ para que eso no se pueda repetir por descuido.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -167,6 +167,25 @@ class ScanContext:
         cutoff = pd.Timestamp(self.now).tz_convert("UTC") - pd.Timedelta(
             minutes=minutes)
         return agg[agg.index <= cutoff]
+
+
+def solo_rth(barras: "pd.DataFrame") -> "pd.DataFrame":
+    """Descarta premarket y after-hours de un frame de barras.
+
+    ``ScanContext.history`` devuelve las barras CRUDAS del proveedor, que
+    incluyen horario extendido: hasta un 49% mas de velas de 1h y un 25% mas de
+    15m. Eso desplaza el punto medio hasta 0.44% y cambia el ancho de banda
+    entre -11% y +27%, asi que altera de verdad cuando disparan las reglas.
+
+    NO se filtra dentro de ``history`` a proposito: hay reglas que legitimamente
+    querrian mirar el extendido. El filtrado se hace explicito en cada sitio que
+    lo necesita, para que se vea en el codigo y no sea un comportamiento oculto.
+    """
+    if barras is None or barras.empty:
+        return barras
+    local = barras.tz_convert(NY)
+    mask = ((local.index.time >= time(9, 30)) & (local.index.time < time(16, 0)))
+    return barras[mask]
 
 
 def _parse_time(text: str):

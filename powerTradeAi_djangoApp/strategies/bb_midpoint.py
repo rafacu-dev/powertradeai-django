@@ -33,8 +33,7 @@ from .base import (
     ScanContext,
     Signal,
     register,
-    target_stop_exit,
-)
+    target_stop_exit, solo_rth)
 from .indicators import atr, bollinger_bands, horizontal_levels
 
 PARAMS = SimpleNamespace(
@@ -208,7 +207,7 @@ def _utc(ts):
 class BBMidpointBase(BaseStrategy):
     direction = "CALL"
     confirmation = "body"
-    rule_version = "bb1h_closed_signal_midpoint_invalid_v5"
+    rule_version = "bb1h_closed_signal_midpoint_invalid_rth_v6"
     default_params = {
         "hold_minutes": MAX_HOLD_MINUTES,
         "flatten_at": "15:55",
@@ -223,8 +222,10 @@ class BBMidpointBase(BaseStrategy):
         El historial de 30 dias alimenta las bandas y los pivotes S/R; la
         sesion de hoy solo aporta velas ya cerradas.
         """
-        hist_1h = ctx.history("1h", days=PARAMS.sr15_lookback_days + 10)
-        hist_15m = ctx.history("15m", days=PARAMS.sr15_lookback_days + 5)
+        # Solo sesion regular: el historial crudo trae premarket y after-hours,
+        # que ensanchan las bandas hasta un 27% y mueven el punto medio.
+        hist_1h = solo_rth(ctx.history("1h", days=PARAMS.sr15_lookback_days + 10))
+        hist_15m = solo_rth(ctx.history("15m", days=PARAMS.sr15_lookback_days + 5))
         today_1h = ctx.resample("1h")
         today_15m = ctx.resample("15m")
 

@@ -34,7 +34,8 @@ import numpy as np
 import pandas as pd
 
 from ..data import candidate_expirations, occ_symbol
-from .base import BaseStrategy, ExitDecision, ScanContext, Signal, register
+from .base import (BaseStrategy, ExitDecision, ScanContext, Signal, register,
+                   solo_rth)
 
 # Parametros congelados del detector (m22_v4_tr3_cd180).
 WINDOWS = (5, 10, 15, 30)
@@ -197,7 +198,7 @@ class TslaW5Stable(BaseStrategy):
     strategy_id = "TSLA_W5_STABLE"
     name = "TSLA W5 filtro estable"
     symbol = "TSLA"
-    rule_version = "w5_stable_exact_v4_causal_tplus1"
+    rule_version = "w5_stable_exact_v5_rth"
     default_params = {
         "window_sec": 5,
         "min_trade_ratio": W5_MIN_TRADE_RATIO,
@@ -223,7 +224,8 @@ class TslaW5Stable(BaseStrategy):
 
     def _h1_support(self, ctx: ScanContext, signal_ts, direction: str) -> str:
         """Estructura horaria con velas cuyo intervalo YA cerro en la señal."""
-        history = ctx.history("1h", days=140)
+        # Solo sesion regular (ver solo_rth): el extendido deforma las EMAs.
+        history = solo_rth(ctx.history("1h", days=140))
         today = ctx.resample("1h")
         h1 = pd.concat([history, today]).sort_index()
         h1 = h1[~h1.index.duplicated(keep="last")]

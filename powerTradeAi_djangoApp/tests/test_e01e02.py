@@ -287,7 +287,7 @@ def test_descarta_premarket_y_afterhours_del_historial():
     entero: el detector daba 11 señales de QQQ en 3 meses cuando la medicion
     correcta daba 2 al año.
     """
-    from powerTradeAi_djangoApp.strategies.e01e02 import _solo_rth
+    from powerTradeAi_djangoApp.strategies.base import solo_rth as _solo_rth
 
     idx, dia = [], datetime(2026, 7, 1)
     for _ in range(3):                      # 08:00..16:45 = 36 barras/dia
