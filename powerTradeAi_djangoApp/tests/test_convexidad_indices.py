@@ -59,12 +59,32 @@ def test_la_paridad_recupera_el_spot_real_de_spx():
 
 
 def test_la_paridad_es_mejor_que_un_ratio_fijo_sobre_el_proxy():
-    """SPY no es SPX/10: acumula dividendos y el cociente deriva. Ese error no
-    se ve en pantalla, pero desplaza todos los strikes."""
-    spy_ese_dia = 668.42
+    """SPY no es SPX/10 exacto: arrastra dividendos y el cociente deriva.
+    Ese error no se ve en pantalla, pero desplaza todos los strikes."""
+    spy_ese_dia = 746.79            # 31-jul-2026, cierre
     por_ratio_10 = spy_ese_dia * 10
     paridad = cx.spot_por_paridad(_filas(SPX_GOLDEN), EXP, HOY)
     assert abs(paridad - SPX_SPOT_REAL) < abs(por_ratio_10 - SPX_SPOT_REAL)
+
+
+def test_el_ratio_de_siembra_esta_cerca_del_real():
+    """Medido: SPX/SPY = 7486.76/746.79 = 10.03 el 31-jul-2026, y 10.03 tambien
+    el 02-ene-2026 (SPX 6886 / SPY 686.73). El ratio 11.2 que se desplego en
+    v1.49.0 era un error: venia de confundir el precio de SPY con el de QQQ, y
+    ponia la semilla un 12% arriba."""
+    assert abs(cs.INDICES["SPX"]["ratio"] - 10.03) < 0.5
+
+
+def test_la_rejilla_de_siembra_absorbe_un_error_grande_del_ratio():
+    """Lo unico que hace segura la semilla es que la rejilla sea ancha: si el
+    spot verdadero cae fuera, la paridad no lo corrige y el indice desaparece
+    de la tabla sin dar ningun error."""
+    semilla = 746.79 * cs.INDICES["SPX"]["ratio"]
+    margen = semilla * cs.MARGEN_SIEMBRA
+    assert semilla - margen <= SPX_SPOT_REAL <= semilla + margen
+    # y aguantaria incluso con el ratio equivocado que se desplego
+    semilla_mala = 746.79 * 11.2
+    assert semilla_mala - semilla_mala * cs.MARGEN_SIEMBRA <= SPX_SPOT_REAL
 
 
 def test_sin_pares_suficientes_no_inventa_un_spot():
@@ -150,19 +170,35 @@ def test_el_escaneo_de_spx_no_pide_el_precio_del_indice(monkeypatch):
     pedidos = []
 
     class Proveedor:
+        """Cadena sintetica valorada con Black-Scholes.
+
+        Tiene que respetar la paridad put-call: una cadena con C == P en todos
+        los strikes es imposible, y ademas hace que la paridad devuelva el
+        centro de la rejilla en vez del spot, que fue como se colo el ratio
+        equivocado sin que ningun test lo viera.
+        """
         def latest_price(self, symbol):
             pedidos.append(symbol)
             if symbol == "SPX":
                 raise RuntimeError("SPX no cotiza como accion")
-            return 668.42
+            return 746.79
 
         def option_quote(self, occ, at=None):
             from powerTradeAi_djangoApp.data import parse_occ
-            simbolo, _, direccion, strike = parse_occ(occ)
+            simbolo, exp, direccion, strike = parse_occ(occ)
             assert simbolo == "SPXW", f"root equivocado: {simbolo}"
-            dist = abs(strike - SPX_SPOT_REAL) / SPX_SPOT_REAL
-            prima = max(0.30, 60.0 * (1 - dist * 22))
-            return SimpleNamespace(bid=round(prima, 2), ask=round(prima * 1.05, 2))
+            right = "CALL" if direccion.upper().startswith("C") else "PUT"
+            t = cx.anos_hasta(exp, exp, 1.0) or 1 / 252
+            prima = cx.precio_bs(SPX_SPOT_REAL, strike, t, 0.10, right)
+            # Una cadena real cotiza tambien los strikes profundos (el K=6100
+            # del 02-ene tenia bid 785.90 con SPX en 6886). Devolver None ahi
+            # dejaba la rejilla de siembra sin pares suficientes.
+            prima = max(prima, 0.10)
+            # La horquilla se construye para que ask > bid SIEMPRE: con un
+            # porcentaje, las primas pequenas redondeaban al mismo centimo y
+            # el filtro ``ask <= bid`` descartaba media cadena.
+            bid = round(prima, 2)
+            return SimpleNamespace(bid=bid, ask=round(bid + max(0.05, prima * 0.04), 2))
 
     from powerTradeAi_djangoApp.engine.session import now_ny
     r = cs.escanear_simbolo(Proveedor(), "SPX", now_ny())

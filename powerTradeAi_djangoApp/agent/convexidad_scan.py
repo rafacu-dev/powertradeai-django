@@ -34,8 +34,13 @@ UNIVERSO = ("SPX", "SPY", "QQQ", "IWM", "DIA", "TSLA", "NVDA", "AAPL",
 #           put-call sobre la propia cadena, no de este cociente: SPY no es
 #           SPX/10 (acumula dividendos) y el cociente deriva con los anos.
 INDICES = {
-    "SPX": {"root": "SPXW", "proxy": "SPY", "ratio": 11.2, "paso": 5.0},
+    "SPX": {"root": "SPXW", "proxy": "SPY", "ratio": 10.03, "paso": 5.0},
 }
+# Margen de la rejilla de siembra, en tanto por uno sobre la semilla. Ancho a
+# proposito: el ratio SPX/SPY deriva con los anos (SPY arrastra dividendos) y
+# la paridad solo corrige si el spot verdadero cae DENTRO de la rejilla. Si
+# queda fuera, el indice desaparece de la tabla sin error visible.
+MARGEN_SIEMBRA = 0.20
 
 
 def _paso_strike(spot: float) -> float:
@@ -114,9 +119,10 @@ def escanear_simbolo(provider, symbol: str, ahora, dte: int = 0) -> dict | None:
             # Pasada 1: rejilla ancha y basta solo para fijar el spot por
             # paridad. La paridad vale en CUALQUIER strike con las dos patas
             # cotizadas, asi que no hace falta afinar aqui.
-            grueso = paso * 20
+            n_pasos = 12
+            grueso = max(paso, round(spot * MARGEN_SIEMBRA / n_pasos / paso) * paso)
             base = round(spot / grueso) * grueso
-            rejilla = [base + i * grueso for i in range(-10, 11)]
+            rejilla = [base + i * grueso for i in range(-n_pasos, n_pasos + 1)]
             real = convexidad.spot_por_paridad(
                 _cotizar(provider, root, exp, rejilla), exp, hoy, fraccion)
             if real is None:
