@@ -41,8 +41,8 @@ from datetime import date
 
 R_LIBRE = 0.04
 FACTOR_REAL = 1.45
-BANDA_STRIKES = 0.12       # se exploran strikes a +-12% del spot
-MAX_STRIKES_LADO = 14
+BANDA_STRIKES = 0.08       # se exploran strikes a +-8% del spot
+MAX_STRIKES_LADO = 24
 SPREAD_MAXIMO_PCT = 25.0
 BID_MINIMO = 0.05
 DIAS_NEGOCIACION_ANO = 252
@@ -193,6 +193,62 @@ def mejor_par(spot, filas, expiracion, hoy, fraccion_sesion=1.0):
 
 
 def strikes_a_explorar(spot: float, paso: float) -> list[float]:
+    """Strikes a explorar alrededor del dinero, con el paso ENSANCHADO si hace
+    falta para cubrir la banda.
+
+    Sin ese ensanchado, un subyacente caro se queda sin banda: SPX a 7.500 con
+    paso 5 cubria +-0.96%, y los contratos que ganan el ranking estan al 1-3%.
+    Quedaban fuera y el ranking salia falso sin avisar de nada.
+    """
+    if spot * BANDA_STRIKES / paso > MAX_STRIKES_LADO:
+        factor = math.ceil(spot * BANDA_STRIKES / MAX_STRIKES_LADO / paso)
+        paso = paso * factor
     atm = round(spot / paso) * paso
-    n = min(int(spot * BANDA_STRIKES / paso), MAX_STRIKES_LADO)
+    # ceil, no int: truncar dejaba la banda por debajo de lo prometido (con
+    # spot 300 y paso 5 salian +-6.7% en vez de +-8%).
+    n = min(math.ceil(spot * BANDA_STRIKES / paso), MAX_STRIKES_LADO)
     return [round(atm + i * paso, 2) for i in range(-n, n + 1)]
+
+
+def spot_por_paridad(filas, expiracion, hoy, fraccion_sesion=1.0,
+                     minimo_pares=3) -> float | None:
+    """Precio del subyacente implicito en la propia cadena.
+
+        C - P = S - K*e^(-rT)   =>   S = C - P + K*e^(-rT)
+
+    Para los INDICES (SPX), donde no hay endpoint de precio al contado: son
+    europeas, asi que la paridad es exacta. Y es mejor referencia que un ETF
+    proxy, porque SPY no es SPX/10 —acumula dividendos y el cociente deriva con
+    los anos— asi que cualquier ratio fijo introduce un error que no se ve.
+
+    Se prefieren los pares mas cercanos al dinero (menor |C-P|), donde la
+    horquilla pesa menos sobre el mid, y se toma la MEDIANA para que un par mal
+    cotizado no arrastre el resultado.
+    """
+    t = anos_hasta(expiracion, hoy, fraccion_sesion)
+    por_strike: dict[float, dict[str, float]] = {}
+    for f in filas:
+        bid, ask = f.get("bid"), f.get("ask")
+        if not bid or not ask or ask <= bid:
+            continue
+        lado = "C" if str(f["right"]).upper().startswith("C") else "P"
+        por_strike.setdefault(float(f["strike"]), {})[lado] = (bid + ask) / 2
+
+    estimaciones = []
+    for strike, lados in por_strike.items():
+        if "C" not in lados or "P" not in lados:
+            continue
+        c, p = lados["C"], lados["P"]
+        estimaciones.append((abs(c - p), c - p + strike * math.exp(-R_LIBRE * t)))
+    if len(estimaciones) < minimo_pares:
+        return None
+    # Se ordena SOLO por |C-P| y el corte se toma por valor, no por posicion:
+    # asi los empates entran todos. Cortando por posicion sobre la tupla, el
+    # desempate lo hacia el propio spot estimado y la seleccion se sesgaba
+    # sistematicamente hacia los strikes bajos.
+    estimaciones.sort(key=lambda x: x[0])
+    corte = estimaciones[min(11, len(estimaciones) - 1)][0]
+    cercanos = sorted(s for d, s in estimaciones if d <= corte)
+    n = len(cercanos)
+    return (cercanos[n // 2] if n % 2
+            else (cercanos[n // 2 - 1] + cercanos[n // 2]) / 2)
