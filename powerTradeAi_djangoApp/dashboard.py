@@ -262,6 +262,42 @@ def agent_launch(request):
     })
 
 
+# ── Convexidad ──────────────────────────────────────────────────────
+
+@staff_member_required
+@require_GET
+def convexidad_view(request):
+    """Que contrato se duplica con el menor movimiento, por simbolo.
+
+    Sirve SIEMPRE lo cacheado y dispara el refresco en un hilo: un escaneo son
+    ~30 cotizaciones por simbolo y el web solo tiene dos hilos de gunicorn."""
+    from .agent import convexidad_scan
+
+    datos = convexidad_scan.cacheado()
+    if datos is None or request.GET.get("refrescar"):
+        lanzado = convexidad_scan.refrescar_en_fondo()
+    else:
+        lanzado = False
+    return render(request, "powertradeai/convexidad.html", {
+        "datos": datos,
+        "refrescando": lanzado or bool(datos is None),
+        "universo": convexidad_scan.UNIVERSO,
+    })
+
+
+@staff_member_required
+@require_GET
+def convexidad_data(request):
+    from .agent import convexidad_scan
+
+    datos = convexidad_scan.cacheado()
+    if datos is None:
+        convexidad_scan.refrescar_en_fondo()
+        return JsonResponse({"listo": False,
+                             "nota": "calculando, vuelve en unos segundos"})
+    return JsonResponse({"listo": True, **datos})
+
+
 # ── Chart view ──────────────────────────────────────────────────────
 
 @staff_member_required

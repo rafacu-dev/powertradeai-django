@@ -1,0 +1,163 @@
+{% load i18n %}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PowerTradeAI — Convexidad</title>
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #eef0f3; --border: #e2e4e9;
+  --text: #1a1d23; --text-2: #5f6370; --text-3: #9194a0; --accent: #3b5bdb;
+  --green: #0ca678; --red: #e03131; --amber: #e67700;
+  --amber-bg: #fff9db; --radius: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318; --surface: #1a1d24; --surface-2: #22262f; --border: #2c2f38;
+    --text: #e4e5e9; --text-2: #9194a0; --text-3: #5f6370; --accent: #5c7cfa;
+    --green: #20c997; --red: #ff6b6b; --amber: #fcc419; --amber-bg: #2c2510;
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.shell { max-width: 1180px; margin: 0 auto; padding: 24px 20px; }
+header { display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 8px; flex-wrap: wrap; gap: 12px; }
+h1 { font-size: 20px; font-weight: 600; }
+h1 small { font-weight: 400; color: var(--text-2); font-size: 14px; }
+nav a { color: var(--accent); text-decoration: none; margin-left: 14px; }
+nav a:hover { text-decoration: underline; }
+.meta { color: var(--text-3); font-size: 12px; margin-bottom: 18px; }
+.aviso {
+  background: var(--amber-bg); border: 1px solid var(--amber);
+  border-left-width: 3px; border-radius: var(--radius);
+  padding: 12px 14px; margin-bottom: 20px; font-size: 13px;
+}
+.aviso b { color: var(--amber); }
+.tabla-wrap { overflow-x: auto; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface); }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 9px 11px; text-align: right; white-space: nowrap;
+  border-bottom: 1px solid var(--border); }
+th { background: var(--surface-2); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--text-2);
+  position: sticky; top: 0; }
+th.g, td.g { border-left: 2px solid var(--border); }
+td.sym, th.sym { text-align: left; font-weight: 600; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--surface-2); }
+.call { color: var(--green); } .put { color: var(--red); }
+.k { font-weight: 600; }
+.mov { font-weight: 600; }
+.aj { color: var(--text-3); font-size: 12px; }
+.vacio { padding: 40px; text-align: center; color: var(--text-2); }
+.btn { display: inline-block; padding: 6px 12px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); text-decoration: none; font-size: 13px; }
+.btn:hover { background: var(--surface-2); }
+.pie { margin-top: 16px; color: var(--text-3); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header>
+  <h1>Convexidad <small>— qué contrato se duplica con el menor movimiento</small></h1>
+  <nav>
+    <a href="{% url 'powertradeai:dashboard' %}">Dashboard</a>
+    <a href="{% url 'powertradeai:agent' %}">Agente</a>
+    <a href="?refrescar=1" class="btn">Refrescar</a>
+  </nav>
+</header>
+
+{% if datos %}
+  <p class="meta">Generado {{ datos.generado }} · {{ datos.filas|length }} símbolos
+  {% if refrescando %}· <b>refrescando en segundo plano…</b>{% endif %}</p>
+{% endif %}
+
+<div class="aviso">
+  <b>El movimiento que muestra esta tabla es un suelo teórico, no una predicción.</b>
+  Se calcula entrando al <i>ask</i> y saliendo al <i>bid</i>, pero con la
+  volatilidad implícita congelada y el movimiento ocurriendo al instante.
+  Medido sobre TSLA (102 sesiones 0DTE, bid/ask reales): la IV cae un 5,1&nbsp;% en
+  los primeros 15&nbsp;minutos —un ~26&nbsp;% de la prima en un 0DTE fuera del
+  dinero—, el subyacente alcanzó el umbral el 67&nbsp;% de los días y la opción
+  solo dobló el 31&nbsp;%. La columna <i>ajustado</i> aplica el factor
+  ×{{ datos.factor_real|default:"1.45" }} que salió de esa medición; es
+  calibración externa sobre TSLA en la apertura, no validada en otros símbolos.
+</div>
+
+{% if not datos %}
+  <div class="tabla-wrap"><div class="vacio">
+    Calculando el primer escaneo… recarga en unos segundos.
+  </div></div>
+{% else %}
+<div class="tabla-wrap">
+<table>
+  <thead>
+    <tr>
+      <th class="sym" rowspan="2">Símbolo</th>
+      <th rowspan="2">Spot</th>
+      <th rowspan="2">Venc.</th>
+      <th class="g call" colspan="4">CALL · sube</th>
+      <th class="g put" colspan="4">PUT · baja</th>
+    </tr>
+    <tr>
+      <th class="g">Strike</th><th>Prima</th>
+      <th>Movimiento</th><th>Ajustado</th>
+      <th class="g">Strike</th><th>Prima</th>
+      <th>Movimiento</th><th>Ajustado</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for f in datos.filas %}
+    <tr>
+      <td class="sym">{{ f.symbol }}</td>
+      <td>{{ f.spot }}</td>
+      <td>{{ f.expiration }}<br><span class="aj">{{ f.dte }} DTE</span></td>
+
+      {% if f.call %}
+        <td class="g k">{{ f.call.strike }}</td>
+        <td>{{ f.call.ask }}<br><span class="aj">${{ f.call.coste_contrato }}</span></td>
+        <td class="mov call">+{{ f.call.movimiento_pct }}%<br>
+            <span class="aj">→ {{ f.call.spot_objetivo }}</span></td>
+        <td class="aj">+{{ f.call.movimiento_pct_ajustado }}%<br>
+            → {{ f.call.spot_objetivo_ajustado }}</td>
+      {% else %}
+        <td class="g aj" colspan="4">sin cadena utilizable</td>
+      {% endif %}
+
+      {% if f.put %}
+        <td class="g k">{{ f.put.strike }}</td>
+        <td>{{ f.put.ask }}<br><span class="aj">${{ f.put.coste_contrato }}</span></td>
+        <td class="mov put">{{ f.put.movimiento_pct }}%<br>
+            <span class="aj">→ {{ f.put.spot_objetivo }}</span></td>
+        <td class="aj">{{ f.put.movimiento_pct_ajustado }}%<br>
+            → {{ f.put.spot_objetivo_ajustado }}</td>
+      {% else %}
+        <td class="g aj" colspan="4">sin cadena utilizable</td>
+      {% endif %}
+    </tr>
+  {% empty %}
+    <tr><td colspan="11" class="vacio">Ningún símbolo devolvió cadena.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<p class="pie">
+  Filtro de liquidez: bid ≥ 0,05 · horquilla ≤ 25&nbsp;% · se descarta todo
+  contrato sin valor extrínseco. «Movimiento» es lo que debe recorrer el
+  subyacente para que la prima valga el doble de lo pagado, cruzando la
+  horquilla en las dos puntas.
+</p>
+{% endif %}
+
+</div>
+</body>
+</html>

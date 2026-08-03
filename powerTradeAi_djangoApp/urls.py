@@ -8,7 +8,8 @@ from django.urls import path
 
 from .dashboard import (
     agent_launch, agent_train_launch, agent_view, chart_chat, chart_data,
-    chart_price, chart_view, dashboard, replay_action, scanner_data,
+    chart_price, chart_view, convexidad_data, convexidad_view, dashboard,
+    replay_action, scanner_data,
 )
 
 app_name = "powertradeai"
@@ -24,4 +25,6 @@ urlpatterns = [
     path("agent/", agent_view, name="agent"),
     path("agent/launch/", agent_launch, name="agent_launch"),
     path("agent/train/", agent_train_launch, name="agent_train_launch"),
+    path("convexidad/", convexidad_view, name="convexidad"),
+    path("convexidad/data/", convexidad_data, name="convexidad_data"),
 ]

@@ -25,6 +25,14 @@ def pytest_configure():
             "powerTradeAi_djangoApp",
         ],
         ROOT_URLCONF="powerTradeAi_djangoApp.tests.urls",
+        # Sin esto las plantillas del dashboard no se pueden renderizar en un
+        # test, y hasta ahora no tenian ninguna cobertura: un {% url %} mal
+        # escrito solo se descubria ya desplegado.
+        TEMPLATES=[{
+            "BACKEND": "django.template.backends.django.DjangoTemplates",
+            "APP_DIRS": True,
+            "OPTIONS": {"context_processors": []},
+        }],
         REST_FRAMEWORK={
             "DEFAULT_AUTHENTICATION_CLASSES": [
                 "powerTradeAi_djangoApp.auth.ApiKeyAuthentication",
