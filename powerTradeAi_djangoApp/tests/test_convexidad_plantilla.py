@@ -91,3 +91,19 @@ def test_la_tabla_cabe_en_movil():
 
 def test_tiene_los_dos_temas():
     assert "prefers-color-scheme: dark" in _html()
+
+
+@pytest.mark.parametrize("plantilla", ["dashboard.html", "agent.html"])
+def test_se_llega_desde_el_resto_del_panel(plantilla):
+    """Una pantalla sin enlace es una pantalla que nadie encuentra: se quedo
+    fuera del primer commit y solo se llegaba escribiendo la URL a mano.
+
+    Se lee el fuente en vez de renderizar porque dashboard.html usa
+    ``{% url 'admin:logout' %}`` y el Django minimo de los tests no monta admin.
+    """
+    from pathlib import Path
+
+    import powerTradeAi_djangoApp
+    ruta = (Path(powerTradeAi_djangoApp.__file__).parent
+            / "templates" / "powertradeai" / plantilla)
+    assert "powertradeai:convexidad" in ruta.read_text(encoding="utf-8")
