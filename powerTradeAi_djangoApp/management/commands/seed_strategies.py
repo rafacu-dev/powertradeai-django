@@ -1,21 +1,64 @@
 """Siembra en base de datos las reglas registradas en el codigo.
 
-Idempotente: actualiza nombre y ``rule_version``, y respeta lo que el operador
-haya tocado (``enabled``, ``contracts``, ``params``).
+Idempotente: actualiza nombre y ``rule_version``, y respeta ``contracts`` y
+``params`` del operador.
 
     python manage.py seed_strategies
+
+QUE REGLAS QUEDAN ACTIVAS
+-------------------------
+Solo las que aparezcan en ``APTAS_PARA_PAPER``. Esa lista **empieza vacia** por
+decision del operador (07-ago-2026): el catalogo se conserva entero como
+registro de investigacion, pero ninguna regla opera hasta que se la anade a
+mano, una por una, cuando su evidencia lo justifique.
+
+El criterio anterior era estructural — cualquier regla cuyo id llevara ``_E01_``
+o ``_E02_`` se activaba sola. Eso hacia que anadir una clase al catalogo la
+pusiera a operar sin que nadie lo decidiera. Una lista explicita invierte esa
+carga: aparecer en el catalogo no da permiso; darlo es un cambio de codigo
+visible en el historial.
+
+COMO ANADIR UNA REGLA
+---------------------
+1. La regla tiene evidencia causal propia y esta lista para paper money.
+2. Se anade su ``strategy_id`` exacto a ``APTAS_PARA_PAPER``, con la fecha y el
+   motivo en el comentario de al lado.
+3. Se despliega y se ejecuta ``seed_strategies``.
+
+No se activa nada desde el admin como via normal. El admin sigue permitiendolo
+para una prueba puntual, pero el siguiente ``seed_strategies`` lo revierte: la
+fuente de verdad es esta lista, no la base de datos.
+
+BORRAR NO ES UNA OPCION
+-----------------------
+``Alert.strategy`` es ``on_delete=PROTECT``: una estrategia con alertas no se
+puede borrar, y es deliberado — destruiria el historico que da sentido a los
+resultados. "Quitar una regla" significa que deje de operar, no que desaparezca.
 """
 from __future__ import annotations
 
-from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from ...models import Strategy
 from ...strategies import all_strategies
 
+# Reglas autorizadas a operar en paper money. VACIA A PROPOSITO.
+#
+# Formato: ("SPY_ORB15_0950_RANGE_INVALID", "07-ago-2026: motivo"),
+#
+# Ninguna candidata actual cumple el listón. El estado de la mas avanzada,
+# SPY ORB-15, esta en LocalQuantAI/estrategias/SPY_ORB/README.md: el orden
+# entre variantes es robusto, pero la magnitud va de +$1.66 a +$17.36 por
+# operacion segun donde se corte la muestra y ninguna ventana tiene mediana
+# positiva. Eso no basta para dimensionar, asi que tampoco para operar.
+APTAS_PARA_PAPER: tuple[tuple[str, str], ...] = ()
+
+_APTAS_IDS = frozenset(strategy_id for strategy_id, _ in APTAS_PARA_PAPER)
+
 
 class Command(BaseCommand):
-    help = "Crea o actualiza las Strategy a partir del catalogo del codigo."
+    help = ("Crea o actualiza las Strategy del catalogo. Solo deja activas las "
+            "de APTAS_PARA_PAPER (hoy: ninguna).")
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -23,29 +66,20 @@ class Command(BaseCommand):
             help="Crea las reglas nuevas desactivadas, para revisarlas antes.")
         parser.add_argument(
             "--preserve-enabled", action="store_true",
-            help="No aplica la contencion Investep al campo enabled existente.")
+            help="No toca el campo enabled existente. Para una prueba manual "
+                 "que no quieres que el seed revierta.")
 
     def handle(self, *args, **options):
         created = updated = 0
-        configured = getattr(settings, "POWERTRADEAI", {}).get(
-            "INVESTEP_WATCHLIST", ("TSLA", "SPY", "QQQ"))
-        if isinstance(configured, str):
-            configured = configured.split(",")
-        watchlist = {
-            str(symbol).strip().upper() for symbol in configured
-            if str(symbol).strip()
-        }
+        desconocidas = _APTAS_IDS - set(all_strategies())
+        if desconocidas:
+            # Un id mal escrito en la lista dejaria la regla apagada en
+            # silencio, que es justo el fallo que se quiere evitar.
+            raise SystemExit(
+                "APTAS_PARA_PAPER nombra reglas que no existen en el catalogo: "
+                + ", ".join(sorted(desconocidas)))
 
-        def allowed(cls) -> bool:
-            academic = any(
-                marker in cls.strategy_id for marker in ("_E01_", "_E02_"))
-            return academic and cls.symbol.upper() in watchlist
-
-        allowed_ids = {
-            strategy_id
-            for strategy_id, cls in all_strategies().items()
-            if allowed(cls) and not options["disable_new"]
-        }
+        allowed_ids = set() if options["disable_new"] else set(_APTAS_IDS)
         if not options["preserve_enabled"]:
             # Incluye filas antiguas que ya no existen en el registro de codigo:
             # una regla huérfana no puede quedar activa por omision del loop.
@@ -53,7 +87,7 @@ class Command(BaseCommand):
                 strategy_id__in=allowed_ids).update(enabled=False)
 
         for strategy_id, cls in sorted(all_strategies().items()):
-            should_enable = allowed(cls) and not options["disable_new"]
+            should_enable = strategy_id in allowed_ids
             row, was_created = Strategy.objects.get_or_create(
                 strategy_id=strategy_id,
                 defaults={
@@ -87,7 +121,17 @@ class Command(BaseCommand):
                 row.save(update_fields=[*changes, "updated_at"])
                 updated += 1
 
+        activas = Strategy.objects.filter(enabled=True).count()
         self.stdout.write(self.style.SUCCESS(
             f"Listo: {created} creadas, {updated} actualizadas, "
-            f"{len(all_strategies())} en el catalogo; activos solo "
-            f"Investep para {', '.join(sorted(watchlist)) or '(ninguno)'}."))
+            f"{len(all_strategies())} en el catalogo."))
+        if activas:
+            self.stdout.write(self.style.SUCCESS(
+                "Activas: " + ", ".join(
+                    Strategy.objects.filter(enabled=True)
+                    .values_list("strategy_id", flat=True).order_by("strategy_id"))))
+        else:
+            self.stdout.write(self.style.WARNING(
+                "Activas: NINGUNA. El scanner corre y registra ScanRun, pero no "
+                "evalua ninguna regla. Es el estado esperado hasta que se anada "
+                "una a APTAS_PARA_PAPER."))

@@ -156,8 +156,24 @@ La migracion v2 es de contencion:
 - deshabilita estrategias existentes;
 - marca replays y posiciones del agente legadas incompletas como error.
 
-Luego `seed_strategies` habilita exclusivamente E01/E02, apertura e intradia,
-para `INVESTEP_WATCHLIST`. El catalogo heredado permanece deshabilitado.
+Luego `seed_strategies` habilita **exclusivamente las reglas listadas en
+`APTAS_PARA_PAPER`**, dentro del propio comando. Esa lista esta **vacia** desde
+el 07-ago-2026 por decision del operador: el catalogo se conserva entero como
+registro de investigacion, pero ninguna regla opera hasta que se la anada a
+mano, una por una, cuando su evidencia lo justifique.
+
+El criterio anterior era estructural — cualquier id con `_E01_` o `_E02_` se
+activaba solo. Eso hacia que anadir una clase al catalogo la pusiera a operar
+sin que nadie lo decidiera. La lista explicita invierte la carga: aparecer en el
+catalogo no da permiso; darlo es un cambio de codigo visible en el historial.
+
+`INVESTEP_WATCHLIST` ya no interviene en que se activa; sigue usandose para el
+universo del agente.
+
+**No se activa nada desde el admin como via normal.** El admin lo permite para
+una prueba puntual, pero el siguiente `seed_strategies` lo revierte: la fuente
+de verdad es la lista, no la base de datos. Para una prueba que deba sobrevivir
+al seed, usa `--preserve-enabled`.
 
 Antes de iniciar workers, confirma:
 
@@ -167,8 +183,9 @@ from powerTradeAi_djangoApp.models import Strategy; \
 print(list(Strategy.objects.filter(enabled=True).values_list('strategy_id', flat=True)))"
 ```
 
-Con la watchlist por defecto deben aparecer 12 reglas: 3 simbolos por E01/E02
-por dos ramas.
+Hoy debe imprimir una lista **vacia**. Con cero reglas activas el scanner sigue
+corriendo y registrando `ScanRun` cada pasada, pero `strategies_evaluated` sera
+0 y no se creara ninguna alerta. Ese es el estado esperado, no un fallo.
 
 ## 6. API keys con menor privilegio
 
@@ -234,7 +251,7 @@ Antes de cambiar de tag:
 1. Ejecuta la suite interna y la de paridad externa.
 2. Revisa nuevas migraciones con `showmigrations` y `sqlmigrate`.
 3. Despliega web y ejecuta migraciones.
-4. Ejecuta `seed_strategies` para reaplicar contencion.
+4. Ejecuta `seed_strategies` para reaplicar la lista de reglas aptas.
 5. Reinicia scanner y agente.
 6. Confirma `manual_hash`, `prompt_version` y `rule_version` en decisiones
    nuevas.

@@ -412,11 +412,22 @@ def test_calculo_de_rango_devuelve_dos_limites_auditables():
     assert sum(row["selected"] for row in result["contracts"]) == 2
 
 
-def test_seed_solo_habilita_e01_e02_en_watchlist(settings):
+def test_seed_solo_habilita_las_de_la_lista_explicita():
+    """El permiso para operar viene de APTAS_PARA_PAPER, no de la forma del id.
+
+    Antes bastaba con que el id llevara ``_E01_`` para que la regla se activara
+    sola: anadir una clase al catalogo la ponia a operar sin que nadie lo
+    decidiera. Ahora aparecer en el catalogo no da permiso.
+    """
     from django.core.management import call_command
 
+    from powerTradeAi_djangoApp.management.commands.seed_strategies import (
+        APTAS_PARA_PAPER,
+    )
     from powerTradeAi_djangoApp.models import Strategy
 
+    # Una fila viva que ya no existe en el registro de codigo no puede quedar
+    # activa por omision del loop.
     Strategy.objects.create(
         strategy_id="REGLA_HUERFANA",
         name="No registrada",
@@ -424,17 +435,39 @@ def test_seed_solo_habilita_e01_e02_en_watchlist(settings):
         rule_version="legacy",
         enabled=True,
     )
-    settings.POWERTRADEAI = {"INVESTEP_WATCHLIST": ("TSLA", "SPY", "QQQ")}
     call_command("seed_strategies", stdout=StringIO())
 
     enabled = set(Strategy.objects.filter(enabled=True).values_list(
         "strategy_id", flat=True))
-    expected = {
-        f"{symbol}_{code}_{branch}"
-        for symbol in ("TSLA", "SPY", "QQQ")
-        for code in ("E01", "E02")
-        for branch in ("APERTURA", "INTRADIA")
-    }
-    assert enabled == expected
-    assert Strategy.objects.exclude(strategy_id__in=expected).filter(
-        enabled=True).count() == 0
+    assert enabled == {strategy_id for strategy_id, _ in APTAS_PARA_PAPER}
+    assert not Strategy.objects.filter(
+        strategy_id="REGLA_HUERFANA", enabled=True).exists()
+
+
+def test_seed_no_deja_activa_ninguna_regla_hoy():
+    """Estado declarado el 07-ago-2026: la aplicacion no opera nada.
+
+    Este test es el que hay que cambiar a proposito al promover la primera
+    regla. Sirve para que anadir una a APTAS_PARA_PAPER sea una decision
+    visible y no un descuido.
+    """
+    from django.core.management import call_command
+
+    from powerTradeAi_djangoApp.models import Strategy
+
+    call_command("seed_strategies", stdout=StringIO())
+    assert Strategy.objects.filter(enabled=True).count() == 0
+    # El catalogo se conserva entero: no operar no es borrar.
+    assert Strategy.objects.count() > 100
+
+
+def test_seed_falla_si_la_lista_nombra_una_regla_inexistente(monkeypatch):
+    """Un id mal escrito dejaria la regla apagada en silencio."""
+    import pytest
+    from django.core.management import call_command
+
+    from powerTradeAi_djangoApp.management.commands import seed_strategies as cmd
+
+    monkeypatch.setattr(cmd, "_APTAS_IDS", frozenset({"NO_EXISTE_ESTA_REGLA"}))
+    with pytest.raises(SystemExit, match="NO_EXISTE_ESTA_REGLA"):
+        call_command("seed_strategies", stdout=StringIO())
