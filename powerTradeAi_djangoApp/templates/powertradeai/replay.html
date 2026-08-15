@@ -399,10 +399,10 @@ function draw() {
     .filter(b => b.time <= currentTime)
     .map(b => ({
       time: b.time,
-      position: b.direction === 'PUT' ? 'aboveBar' : 'belowBar',
-      color: b.direction === 'PUT' ? '#e03131' : '#0ca678',
+      position: 'inBar',
+      color: '#1c7ed6',
       shape: 'circle',
-      text: b.direction === 'PUT' ? '↓ ruptura' : '↑ ruptura',
+      text: '',
     })));
   candles.setMarkers(markers);
   document.getElementById('scrubber').value = cursor;

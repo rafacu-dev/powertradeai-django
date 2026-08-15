@@ -487,8 +487,8 @@ def _first_confirmed_breakout_in_session(session: pd.DataFrame, line: dict,
         )
         if broke_up and confirms_up:
             return _breakout_payload(
-                line, confirm_ts, "CALL", float(confirm["close"]),
-                confirm_level)
+                line, current_ts, "CALL", float(current["close"]),
+                current_level)
 
         broke_down = (
             line["kind"] in {"soporte", "corte"}
@@ -501,8 +501,8 @@ def _first_confirmed_breakout_in_session(session: pd.DataFrame, line: dict,
         )
         if broke_down and confirms_down:
             return _breakout_payload(
-                line, confirm_ts, "PUT", float(confirm["close"]),
-                confirm_level)
+                line, current_ts, "PUT", float(current["close"]),
+                current_level)
     return None
 
 

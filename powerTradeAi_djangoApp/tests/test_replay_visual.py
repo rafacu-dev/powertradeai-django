@@ -166,9 +166,9 @@ def test_breakout_confirmado_marca_la_vela_siguiente():
     out = _confirmed_breakouts(frame, day, [line])
 
     assert out == [{
-        "time": int(idx[2].timestamp()),
+        "time": int(idx[1].timestamp()),
         "direction": "CALL",
-        "price": 103.5,
+        "price": 102.0,
         "line_price": 100.0,
         "timeframe": "15m",
         "kind": "resistencia",
@@ -206,7 +206,7 @@ def test_breakout_confirmado_incluye_corte_lateral():
     out = _confirmed_breakouts(frame, day, [line])
 
     assert out[0]["direction"] == "PUT"
-    assert out[0]["time"] == int(idx[2].timestamp())
+    assert out[0]["time"] == int(idx[1].timestamp())
     assert out[0]["kind"] == "corte"
 
 
