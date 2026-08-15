@@ -513,8 +513,13 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
                 violation = np.max(projected - segment)
             if float(violation) > tol * 3:
                 continue
-            touches = int(np.count_nonzero(np.abs(segment - projected) <= tol))
+            touch_idx = np.flatnonzero(np.abs(segment - projected) <= tol)
+            touch_zones = _touch_zones(touch_idx)
+            touches = len(touch_zones)
             if touches < 3:
+                continue
+            first_touch, last_touch = touch_zones[0][0], touch_zones[-1][-1]
+            if last_touch - first_touch < 4:
                 continue
             end_index = min(len(session) - 1, j + max(2, span))
             end_value = slope * end_index + intercept
@@ -541,6 +546,16 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
                 "end_index": end_index,
             })
     return out
+
+
+def _touch_zones(touch_idx: np.ndarray) -> list[list[int]]:
+    zones: list[list[int]] = []
+    for idx in [int(item) for item in touch_idx]:
+        if zones and idx == zones[-1][-1] + 1:
+            zones[-1].append(idx)
+        else:
+            zones.append([idx])
+    return zones
 
 
 def _swing_points(values: np.ndarray, kind: str) -> list[tuple[int, float]]:

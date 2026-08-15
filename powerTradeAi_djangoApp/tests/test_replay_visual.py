@@ -264,10 +264,10 @@ def test_lineas_intradia_detectan_tendencias_cortas_del_dia():
         for i in range(8)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
-        "open":  [100, 99, 98, 97, 96, 98, 99, 100],
-        "high":  [101, 100, 99, 98, 97, 100, 101, 102],
-        "low":   [98, 97, 96, 95, 94, 97, 98, 99],
-        "close": [99, 98, 97, 96, 95, 99, 100, 101],
+        "open":  [100, 99, 98, 97, 96, 98, 100, 101],
+        "high":  [101, 99.5, 99, 97.5, 97, 102, 103, 104],
+        "low":   [99, 97, 97, 95, 95, 97, 99, 100],
+        "close": [100, 98, 98, 96, 96, 100, 101, 102],
         "volume": [100] * 8,
     }, index=idx)
 
@@ -324,10 +324,10 @@ def test_lineas_intradia_usan_temporalidad_de_5m():
         for i in range(12)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
-        "open":  [109, 108, 107, 106, 105, 104, 103, 102, 101, 100, 101, 102],
-        "high":  [110, 109, 108, 107, 106, 105, 104, 103, 102, 101, 102, 103],
-        "low":   [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 108, 107],
-        "close": [108, 107, 106, 105, 104, 103, 102, 101, 100, 101, 102, 103],
+        "open":  [99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+        "high":  [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112],
+        "low":   [100, 101, 103, 103, 104, 106, 106, 107, 109, 109, 110, 112],
+        "close": [101, 102, 102, 104, 105, 105, 107, 108, 108, 110, 111, 111],
         "volume": [100] * 12,
     }, index=idx)
 
@@ -337,3 +337,31 @@ def test_lineas_intradia_usan_temporalidad_de_5m():
     assert all(line["timeframe"] == "5m" for line in lines)
     assert all(line["touches"] >= 3 for line in lines)
     assert all(line["label"].startswith("5m intradia") for line in lines)
+
+
+def test_lineas_intradia_no_cuentan_velas_consecutivas_como_tres_toques():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_5m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=5 * i)
+        for i in range(8)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open":  [99, 100, 101, 102, 103, 104, 105, 106],
+        "high":  [101, 102, 103, 104, 105, 106, 107, 108],
+        "low":   [100, 101, 102, 103, 110, 111, 112, 113],
+        "close": [101, 102, 103, 104, 105, 106, 107, 108],
+        "volume": [100] * 8,
+    }, index=idx)
+
+    support_lines = [
+        line for line in _intraday_trendlines_5m(frame, replay_day)
+        if line["kind"] == "soporte"
+    ]
+
+    assert support_lines == []
