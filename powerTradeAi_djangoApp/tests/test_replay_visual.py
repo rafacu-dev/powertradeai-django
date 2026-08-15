@@ -100,3 +100,35 @@ def test_replay_timeline_grafica_15m_con_cinco_dias_previos_rth():
     }
     assert all(time(9, 30) <= ts.time() < time(16, 0) for ts in local_times)
     assert all(ts.minute in {0, 15, 30, 45} for ts in local_times)
+
+
+def test_trendlines_devuelven_lineas_dibujables():
+    import pandas as pd
+    from datetime import datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _trendlines_for_frame
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 3, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(18)
+    ]).tz_convert("UTC")
+    highs = [10, 11, 15, 12, 11, 14, 11, 10, 13, 10, 9, 12, 9, 8, 11, 8, 7, 10]
+    lows = [8, 7, 6, 8, 9, 7, 9, 10, 8, 10, 11, 9, 11, 12, 10, 12, 13, 11]
+    frame = pd.DataFrame({
+        "open": lows,
+        "high": highs,
+        "low": lows,
+        "close": [(h + l) / 2 for h, l in zip(highs, lows)],
+        "volume": [100] * len(idx),
+    }, index=idx)
+
+    lines = _trendlines_for_frame(
+        frame, "15m", int(idx[0].timestamp()), int(idx[-1].timestamp()))
+
+    assert any(line["kind"] == "resistencia" for line in lines)
+    assert any(line["kind"] == "soporte" for line in lines)
+    for line in lines:
+        assert line["timeframe"] == "15m"
+        assert len(line["points"]) == 2
+        assert all("time" in point and "value" in point for point in line["points"])

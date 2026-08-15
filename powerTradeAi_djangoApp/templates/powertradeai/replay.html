@@ -93,6 +93,13 @@ button:disabled { opacity: .55; cursor: default; }
 }
 #scrubber { width: 100%; accent-color: var(--accent); }
 .clock { color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.legend {
+  display: flex; gap: 10px; flex-wrap: wrap; padding: 8px 12px;
+  border-top: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); font-size: 11px;
+}
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 18px; height: 3px; display: inline-block; border-radius: 2px; }
 .side {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; min-height: 610px; display: flex; flex-direction: column;
@@ -170,6 +177,7 @@ button:disabled { opacity: .55; cursor: default; }
         <input type="range" id="scrubber" min="0" max="0" value="0" disabled>
         <div class="clock" id="clock">--:--</div>
       </div>
+      <div class="legend" id="line-legend"></div>
     </div>
     <aside class="side">
       <div class="side-head">
@@ -190,7 +198,8 @@ button:disabled { opacity: .55; cursor: default; }
   referrerpolicy="no-referrer"></script>
 <script>
 let chart, candles, markers = [];
-let allCandles = [], allEvents = [], cursor = 0, timer = null, replayStartIndex = 0;
+let allCandles = [], allEvents = [], allTrendlines = [], trendlineSeries = [];
+let cursor = 0, timer = null, replayStartIndex = 0;
 
 function color(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -213,6 +222,11 @@ function ensureChart() {
     wickUpColor: '#0ca678', wickDownColor: '#e03131',
   });
   new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth, height: el.clientHeight })).observe(el);
+}
+function trendlineStyle(line) {
+  if (line.kind === 'soporte') return { color: '#0ca678', width: 2, style: LightweightCharts.LineStyle.Solid };
+  if (line.kind === 'resistencia') return { color: '#e03131', width: 2, style: LightweightCharts.LineStyle.Solid };
+  return { color: '#e67700', width: 1, style: LightweightCharts.LineStyle.Dashed };
 }
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -251,6 +265,7 @@ async function loadReplay() {
     ensureChart();
     allCandles = data.candles || [];
     allEvents = data.events || [];
+    allTrendlines = data.trendlines || [];
     replayStartIndex = findReplayStartIndex(data.replay_start_time);
     cursor = replayStartIndex;
     document.getElementById('scrubber').min = replayStartIndex;
@@ -259,15 +274,49 @@ async function loadReplay() {
     document.getElementById('play-btn').disabled = allCandles.length === 0;
     document.getElementById('step-btn').disabled = allCandles.length === 0;
     renderEvents();
+    drawTrendlines();
     draw();
     status.textContent = `${data.date} · ${data.symbol} · ${data.timeframe || '15m'} · ${allCandles.length} velas RTH · ${allEvents.length} eventos`;
     const signals = allEvents.filter(e => e.type === 'signal').length;
-    document.getElementById('event-summary').textContent = `${data.strategies.length} regla(s), ${signals} señal(es).`;
+    document.getElementById('event-summary').textContent = `${data.strategies.length} regla(s), ${signals} señal(es), ${allTrendlines.length} línea(s).`;
   } catch (err) {
     status.textContent = 'Error: ' + err.message;
   } finally {
     document.getElementById('loading').style.display = 'none';
   }
+}
+function drawTrendlines() {
+  if (!chart) return;
+  trendlineSeries.forEach(series => chart.removeSeries(series));
+  trendlineSeries = [];
+  const legend = document.getElementById('line-legend');
+  legend.replaceChildren();
+  const labels = new Set();
+  allTrendlines.forEach(line => {
+    if (!line.points || line.points.length < 2) return;
+    const style = trendlineStyle(line);
+    const series = chart.addLineSeries({
+      color: style.color,
+      lineWidth: style.width,
+      lineStyle: style.style,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+      title: line.label || '',
+    });
+    series.setData(line.points);
+    trendlineSeries.push(series);
+    const label = `${line.timeframe} ${line.kind}`;
+    if (!labels.has(label)) {
+      labels.add(label);
+      const item = document.createElement('span');
+      const swatch = document.createElement('i');
+      swatch.style.background = style.color;
+      if (line.kind === 'corte') swatch.style.opacity = '0.8';
+      item.append(swatch, document.createTextNode(label));
+      legend.appendChild(item);
+    }
+  });
 }
 function draw() {
   if (!candles) return;

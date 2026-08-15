@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+import numpy as np
 import pandas as pd
 from django.db import transaction
 from django.utils import timezone
@@ -58,6 +59,7 @@ class ReplayTimeline:
     timeframe: str = "15m"
     replay_start_time: int | None = None
     candles: list[dict] = field(default_factory=list)
+    trendlines: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     strategies: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
@@ -140,6 +142,7 @@ def replay_timeline(day: date, symbol: str, provider=None,
     display_bars = _display_bars_15m(provider, symbol, day)
     timeline.candles = _candles_payload(display_bars)
     timeline.replay_start_time = _first_replay_candle_time(display_bars, day)
+    timeline.trendlines = _trendlines_payload(provider, symbol, day, display_bars)
     if bars.empty:
         return timeline
 
@@ -244,6 +247,189 @@ def _first_replay_candle_time(bars: pd.DataFrame, day: date) -> int | None:
     if same_day.empty:
         return None
     return int(same_day.index[0].timestamp())
+
+
+def _trendlines_payload(provider, symbol: str, day: date,
+                        display_bars: pd.DataFrame) -> list[dict]:
+    """Lineas multi-temporalidad calculadas con datos cerrados antes del replay."""
+    if display_bars is None or display_bars.empty:
+        return []
+    draw_start = int(display_bars.index[0].timestamp())
+    draw_end = int(display_bars.index[-1].timestamp())
+    previous = day - timedelta(days=1)
+    specs = [
+        ("1mo", _monthly_bars(provider, symbol, previous), 12),
+        ("1w", _weekly_bars(provider, symbol, previous), 52),
+        ("1d", provider.bars(symbol, previous - timedelta(days=260), previous, "1d"), 120),
+        ("1h", _rth_only(provider.bars(
+            symbol, previous - timedelta(days=90), previous, "1h")), 160),
+        ("15m", display_bars[
+            display_bars.index.tz_convert(NY).date < day
+        ], 140),
+    ]
+    out: list[dict] = []
+    for timeframe, bars, lookback in specs:
+        frame = bars.tail(lookback) if bars is not None and not bars.empty else bars
+        out.extend(_trendlines_for_frame(frame, timeframe, draw_start, draw_end))
+    return out
+
+
+def _monthly_bars(provider, symbol: str, end: date) -> pd.DataFrame:
+    daily = provider.bars(symbol, end - timedelta(days=550), end, "1d")
+    return _resample_ohlc(daily, "ME")
+
+
+def _weekly_bars(provider, symbol: str, end: date) -> pd.DataFrame:
+    daily = provider.bars(symbol, end - timedelta(days=420), end, "1d")
+    return _resample_ohlc(daily, "W-FRI")
+
+
+def _resample_ohlc(bars: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if bars is None or bars.empty:
+        return bars
+    return bars.resample(rule).agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum",
+    }).dropna(subset=["close"])
+
+
+def _trendlines_for_frame(bars: pd.DataFrame, timeframe: str,
+                          draw_start: int, draw_end: int) -> list[dict]:
+    if bars is None or len(bars) < 8:
+        return []
+    highs = bars["high"].astype(float).to_numpy()
+    lows = bars["low"].astype(float).to_numpy()
+    closes = bars["close"].astype(float).to_numpy()
+    piv_high, piv_low = _pivot_points(highs, lows)
+    lines = []
+    source_last = int(bars.index[-1].timestamp())
+
+    res = _best_diagonal_line(piv_high, len(bars), timeframe, "resistencia")
+    if res is not None:
+        lines.append(_line_payload(res, draw_start, draw_end, source_last))
+    sup = _best_diagonal_line(piv_low, len(bars), timeframe, "soporte")
+    if sup is not None:
+        lines.append(_line_payload(sup, draw_start, draw_end, source_last))
+
+    for level in _horizontal_levels(piv_high + piv_low, closes):
+        lines.append({
+            "timeframe": timeframe,
+            "kind": "corte",
+            "direction": "lateral",
+            "touches": level["touches"],
+            "score": level["touches"],
+            "points": [
+                {"time": draw_start, "value": level["price"]},
+                {"time": draw_end, "value": level["price"]},
+            ],
+            "label": f"{timeframe} corte {level['price']}",
+        })
+    return lines
+
+
+def _pivot_points(highs: np.ndarray, lows: np.ndarray, window: int = 2):
+    piv_high, piv_low = [], []
+    n = len(highs)
+    for i in range(window, n - window):
+        h_slice = highs[i - window:i + window + 1]
+        l_slice = lows[i - window:i + window + 1]
+        if highs[i] == h_slice.max() and np.count_nonzero(h_slice == highs[i]) == 1:
+            piv_high.append((i, float(highs[i])))
+        if lows[i] == l_slice.min() and np.count_nonzero(l_slice == lows[i]) == 1:
+            piv_low.append((i, float(lows[i])))
+    return piv_high, piv_low
+
+
+def _best_diagonal_line(points: list[tuple[int, float]], n: int,
+                        timeframe: str, kind: str) -> dict | None:
+    if len(points) < 2:
+        return None
+    pivots = points[-8:]
+    best = None
+    for i in range(len(pivots) - 1):
+        for j in range(i + 1, len(pivots)):
+            x1, y1 = pivots[i]
+            x2, y2 = pivots[j]
+            if x2 == x1:
+                continue
+            slope = (y2 - y1) / (x2 - x1)
+            if kind == "resistencia" and slope >= 0:
+                continue
+            if kind == "soporte" and slope <= 0:
+                continue
+            intercept = y1 - slope * x1
+            prices = np.array([p[1] for p in pivots], dtype=float)
+            xs = np.array([p[0] for p in pivots], dtype=float)
+            projected = slope * xs + intercept
+            tol = max(float(np.median(prices)) * 0.004, 0.01)
+            touches = int(np.count_nonzero(np.abs(prices - projected) <= tol))
+            if touches < 2:
+                continue
+            score = touches * 10 + abs(x2 - x1)
+            candidate = {
+                "timeframe": timeframe,
+                "kind": kind,
+                "direction": "bajista" if kind == "resistencia" else "alcista",
+                "touches": touches,
+                "score": score,
+                "slope": float(slope),
+                "intercept": float(intercept),
+                "start_index": max(0, x1 - 1),
+                "end_index": n - 1,
+            }
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+    return best
+
+
+def _line_payload(line: dict, start_time: int, end_time: int,
+                  source_last_time: int) -> dict:
+    seconds = _timeframe_seconds(line["timeframe"])
+    x1 = line["end_index"] + (start_time - source_last_time) / seconds
+    x2 = line["end_index"] + (end_time - source_last_time) / seconds
+    y1 = line["slope"] * x1 + line["intercept"]
+    y2 = line["slope"] * x2 + line["intercept"]
+    return {
+        "timeframe": line["timeframe"],
+        "kind": line["kind"],
+        "direction": line["direction"],
+        "touches": line["touches"],
+        "score": line["score"],
+        "points": [
+            {"time": start_time, "value": round(float(y1), 4)},
+            {"time": end_time, "value": round(float(y2), 4)},
+        ],
+        "label": f"{line['timeframe']} {line['kind']} {line['direction']}",
+    }
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    return {
+        "15m": 15 * 60,
+        "1h": 60 * 60,
+        "1d": 24 * 60 * 60,
+        "1w": 7 * 24 * 60 * 60,
+        "1mo": 30 * 24 * 60 * 60,
+    }[timeframe]
+
+
+def _horizontal_levels(points: list[tuple[int, float]], closes: np.ndarray) -> list[dict]:
+    if len(points) < 3:
+        return []
+    prices = sorted(float(p[1]) for p in points)
+    ref = float(np.median(closes)) if len(closes) else prices[-1]
+    tol = max(ref * 0.004, 0.01)
+    clusters: list[list[float]] = []
+    for price in prices:
+        if clusters and abs(price - np.mean(clusters[-1])) <= tol:
+            clusters[-1].append(price)
+        else:
+            clusters.append([price])
+    levels = [
+        {"price": round(float(np.mean(cluster)), 4), "touches": len(cluster)}
+        for cluster in clusters if len(cluster) >= 3
+    ]
+    return sorted(levels, key=lambda item: item["touches"], reverse=True)[:3]
 
 
 def _observation_event(strategy_id: str, ctx: ScanContext,
