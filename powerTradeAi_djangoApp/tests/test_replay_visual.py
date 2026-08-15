@@ -136,6 +136,15 @@ def test_trendlines_devuelven_lineas_dibujables():
         assert all("time" in point and "value" in point for point in line["points"])
 
 
+def test_trendlines_diagonales_exigen_tres_toques():
+    from powerTradeAi_djangoApp.engine.replay import _best_diagonal_line
+
+    line = _best_diagonal_line(
+        [(0, 10.0), (4, 8.0)], n=6, timeframe="15m", kind="resistencia")
+
+    assert line is None
+
+
 def test_breakout_confirmado_marca_la_vela_siguiente():
     import pandas as pd
     from datetime import date, datetime, timedelta

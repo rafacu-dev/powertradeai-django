@@ -366,7 +366,7 @@ def _best_diagonal_line(points: list[tuple[int, float]], n: int,
             projected = slope * xs + intercept
             tol = max(float(np.median(prices)) * 0.004, 0.01)
             touches = int(np.count_nonzero(np.abs(prices - projected) <= tol))
-            if touches < 2:
+            if touches < 3:
                 continue
             score = touches * 10 + abs(x2 - x1)
             candidate = {
