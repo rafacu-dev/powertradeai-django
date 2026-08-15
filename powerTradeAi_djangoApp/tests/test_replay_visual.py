@@ -261,14 +261,14 @@ def test_lineas_intradia_detectan_tendencias_cortas_del_dia():
     replay_day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
         datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
-        for i in range(8)
+        for i in range(9)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
-        "open":  [100, 99, 98, 97, 96, 98, 100, 101],
-        "high":  [101, 99.5, 99, 97.5, 97, 102, 103, 104],
-        "low":   [99, 97, 97, 95, 95, 97, 99, 100],
-        "close": [100, 98, 98, 96, 96, 100, 101, 102],
-        "volume": [100] * 8,
+        "open":  [100, 99, 98, 97, 96, 95, 94, 95, 97],
+        "high":  [101, 99, 98, 98, 96, 95, 95, 98, 100],
+        "low":   [99, 97, 96, 95, 94, 93, 92, 94, 96],
+        "close": [100, 98, 97, 96, 95, 94, 94, 97, 99],
+        "volume": [100] * 9,
     }, index=idx)
 
     lines = _intraday_trendlines_15m(frame, replay_day)
@@ -281,7 +281,7 @@ def test_lineas_intradia_detectan_tendencias_cortas_del_dia():
 
     breakouts = _confirmed_breakouts(frame, replay_day, intraday_res)
     assert breakouts
-    assert breakouts[0]["time"] == int(idx[5].timestamp())
+    assert breakouts[0]["time"] == int(idx[7].timestamp())
 
 
 def test_lineas_intradia_se_limitan_a_pocas_por_tipo_en_la_sesion():
@@ -393,6 +393,30 @@ def test_lineas_intradia_rechazan_tendencias_menores_a_45_minutos():
         "low":   [100, 101, 103, 104, 105, 106, 106, 107, 108, 109, 110, 111],
         "close": list(range(101, 113)),
         "volume": [100] * 12,
+    }, index=idx)
+
+    assert _intraday_trendlines_3m(frame, replay_day) == []
+
+
+def test_lineas_intradia_exigen_dos_velas_intermedias_entre_toques():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
+        for i in range(21)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open":  list(range(100, 121)),
+        "high":  list(range(101, 122)),
+        "low":   [100, 101, 101, 103, 104, 105, 106, 107, 108, 109,
+                  110, 111, 112, 113, 114, 115, 116, 112, 118, 119, 120],
+        "close": list(range(101, 122)),
+        "volume": [100] * 21,
     }, index=idx)
 
     assert _intraday_trendlines_3m(frame, replay_day) == []

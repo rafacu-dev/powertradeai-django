@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 RTH_FIRST_DECISION = "09:31"   # antes no hay ninguna vela cerrada
 INTRADAY_TRENDLINE_MINUTES = 3
 INTRADAY_TRENDLINE_MIN_DURATION = 45 * 60
+INTRADAY_TRENDLINE_MIN_BARS_BETWEEN_TOUCHES = 2
 
 
 @dataclass
@@ -525,6 +526,9 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
             touches = len(touch_zones)
             if touches < 3:
                 continue
+            if not _touch_zones_have_spacing(
+                touch_zones, INTRADAY_TRENDLINE_MIN_BARS_BETWEEN_TOUCHES):
+                continue
             first_touch, last_touch = touch_zones[0][0], touch_zones[-1][-1]
             touch_duration = (
                 int(session.index[i + last_touch].timestamp())
@@ -567,6 +571,14 @@ def _touch_zones(touch_idx: np.ndarray) -> list[list[int]]:
         else:
             zones.append([idx])
     return zones
+
+
+def _touch_zones_have_spacing(zones: list[list[int]], min_between: int) -> bool:
+    for prev, current in zip(zones, zones[1:]):
+        intermediate_bars = current[0] - prev[-1] - 1
+        if intermediate_bars < min_between:
+            return False
+    return True
 
 
 def _swing_points(values: np.ndarray, kind: str) -> list[tuple[int, float]]:
