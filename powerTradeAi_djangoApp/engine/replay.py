@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 RTH_FIRST_DECISION = "09:31"   # antes no hay ninguna vela cerrada
 INTRADAY_TRENDLINE_MINUTES = 15
 INTRADAY_TRENDLINE_MIN_DURATION = 45 * 60
-INTRADAY_TRENDLINE_TOUCH_BAND_BPS = 18
+INTRADAY_TRENDLINE_TOUCH_BAND_BPS = 4
 
 
 @dataclass
@@ -452,26 +452,92 @@ def _intraday_trendlines_15m(bars: pd.DataFrame, replay_day: date) -> list[dict]
     previous = bars[bars.index.tz_convert(NY).date < replay_day]
     if previous.empty:
         return []
-    out: list[dict] = []
+    out = []
     for _, session in previous.groupby(previous.index.tz_convert(NY).date):
         out.extend(_session_micro_trendlines(session))
-    return out
+    return _extend_continuing_intraday_lines(out, bars)
 
 
 def _session_micro_trendlines(session: pd.DataFrame) -> list[dict]:
     if len(session) < 5:
         return []
     candidates = []
-    candidates.extend(_swing_trendlines(session, "resistencia"))
-    candidates.extend(_swing_trendlines(session, "soporte"))
-    max_window = min(16, len(session))
-    min_window = max(4, int(np.ceil(INTRADAY_TRENDLINE_MIN_DURATION / (15 * 60))) + 1)
-    for start in range(0, len(session) - min_window + 1):
-        for end in range(start + min_window, min(len(session), start + max_window) + 1):
-            window = session.iloc[start:end]
-            candidates.extend(_swing_trendlines(window, "resistencia", offset=start))
-            candidates.extend(_swing_trendlines(window, "soporte", offset=start))
+    for start, end, kind in _zigzag_legs(session):
+        window = session.iloc[start:end + 1]
+        candidates.extend(_swing_trendlines(window, kind, offset=start))
     return _select_swing_lines(candidates)
+
+
+def _zigzag_legs(session: pd.DataFrame) -> list[tuple[int, int, str]]:
+    highs = session["high"].astype(float).to_numpy()
+    lows = session["low"].astype(float).to_numpy()
+    if len(highs) < 5:
+        return []
+    threshold = _zigzag_threshold(highs, lows)
+    pivots: list[tuple[str, int, float]] = []
+    trend = None
+    high_idx = low_idx = 0
+    high = float(highs[0])
+    low = float(lows[0])
+    for i in range(1, len(highs)):
+        made_new_high = False
+        made_new_low = False
+        if highs[i] > high:
+            high = float(highs[i])
+            high_idx = i
+            made_new_high = True
+        if lows[i] < low:
+            low = float(lows[i])
+            low_idx = i
+            made_new_low = True
+
+        if trend is None:
+            if high - low < threshold:
+                continue
+            if high_idx > low_idx:
+                pivots.append(("low", low_idx, low))
+                trend = "up"
+            else:
+                pivots.append(("high", high_idx, high))
+                trend = "down"
+            continue
+
+        if trend == "up" and not made_new_high and high - lows[i] >= threshold:
+            pivots.append(("high", high_idx, high))
+            trend = "down"
+            low = float(lows[i])
+            low_idx = i
+        elif trend == "down" and not made_new_low and highs[i] - low >= threshold:
+            pivots.append(("low", low_idx, low))
+            trend = "up"
+            high = float(highs[i])
+            high_idx = i
+
+    if trend == "up" and (not pivots or pivots[-1][1] != high_idx):
+        pivots.append(("high", high_idx, high))
+    elif trend == "down" and (not pivots or pivots[-1][1] != low_idx):
+        pivots.append(("low", low_idx, low))
+
+    legs = []
+    for left, right in zip(pivots, pivots[1:]):
+        left_type, start, _ = left
+        right_type, end, _ = right
+        if end <= start:
+            continue
+        duration = int(session.index[end].timestamp()) - int(session.index[start].timestamp())
+        if duration < INTRADAY_TRENDLINE_MIN_DURATION:
+            continue
+        if left_type == "low" and right_type == "high":
+            legs.append((start, end, "soporte"))
+        elif left_type == "high" and right_type == "low":
+            legs.append((start, end, "resistencia"))
+    return legs
+
+
+def _zigzag_threshold(highs: np.ndarray, lows: np.ndarray) -> float:
+    ref = float(np.median((highs + lows) / 2))
+    median_range = float(np.median(highs - lows))
+    return max(ref * 0.0012, median_range * 1.2, 0.45)
 
 
 def _swing_trendlines(session: pd.DataFrame, kind: str, offset: int = 0) -> list[dict]:
@@ -480,7 +546,7 @@ def _swing_trendlines(session: pd.DataFrame, kind: str, offset: int = 0) -> list
     if len(anchors) < 2:
         return []
     ref = float(np.median(values))
-    min_move = max(ref * 0.0015, 0.05)
+    min_move = max(ref * 0.0005, 0.05)
     tol = _intraday_touch_band(ref)
     out = []
     for left in range(len(anchors) - 1):
@@ -506,21 +572,20 @@ def _swing_trendlines(session: pd.DataFrame, kind: str, offset: int = 0) -> list
                 violation = np.max(segment - projected)
             else:
                 violation = np.max(projected - segment)
-            if float(violation) > tol * 3:
+            if float(violation) > tol * 0.5:
                 continue
             touch_idx = np.flatnonzero(np.abs(segment - projected) <= tol)
-            touch_zones = _touch_zones(touch_idx)
-            touches = len(touch_zones)
+            touches = int(len(touch_idx))
             if touches < 3:
                 continue
-            first_touch, last_touch = touch_zones[0][0], touch_zones[-1][-1]
+            first_touch, last_touch = int(touch_idx[0]), int(touch_idx[-1])
             touch_duration = (
                 int(session.index[i + last_touch].timestamp())
                 - int(session.index[i + first_touch].timestamp())
             )
             if touch_duration < INTRADAY_TRENDLINE_MIN_DURATION:
                 continue
-            local_end_index = min(len(session) - 1, j + max(1, span // 2))
+            local_end_index = min(len(session) - 1, j + max(1, span))
             end_value = slope * local_end_index + intercept
             out.append({
                 "timeframe": "15m",
@@ -528,6 +593,7 @@ def _swing_trendlines(session: pd.DataFrame, kind: str, offset: int = 0) -> list
                 "direction": "bajista" if kind == "resistencia" else "alcista",
                 "touches": touches,
                 "score": round(float(move), 4),
+                "penetration": round(float(violation), 4),
                 "points": [
                     {
                         "time": int(session.index[i].timestamp()),
@@ -543,6 +609,8 @@ def _swing_trendlines(session: pd.DataFrame, kind: str, offset: int = 0) -> list
                 "session_date": str(session.index[-1].tz_convert(NY).date()),
                 "start_index": offset + i,
                 "end_index": offset + local_end_index,
+                "leg_start_index": offset,
+                "leg_end_index": offset + len(session) - 1,
             })
     return out
 
@@ -551,14 +619,121 @@ def _intraday_touch_band(reference_price: float) -> float:
     return max(reference_price * (INTRADAY_TRENDLINE_TOUCH_BAND_BPS / 10000), 0.05)
 
 
-def _touch_zones(touch_idx: np.ndarray) -> list[list[int]]:
-    zones: list[list[int]] = []
-    for idx in [int(item) for item in touch_idx]:
-        if zones and idx == zones[-1][-1] + 1:
-            zones[-1].append(idx)
-        else:
-            zones.append([idx])
-    return zones
+def _extend_continuing_intraday_lines(lines: list[dict],
+                                      bars: pd.DataFrame) -> list[dict]:
+    if not lines or bars is None or bars.empty:
+        return lines
+    position_by_time = {
+        int(ts.timestamp()): i for i, ts in enumerate(bars.index)
+    }
+    highs = bars["high"].astype(float).to_numpy()
+    lows = bars["low"].astype(float).to_numpy()
+    out = []
+    for line in lines:
+        points = line.get("points") or []
+        if len(points) < 2:
+            out.append(line)
+            continue
+        p1, p2 = points[0], points[-1]
+        start_pos = position_by_time.get(int(p1["time"]))
+        end_pos = position_by_time.get(int(p2["time"]))
+        if start_pos is None or end_pos is None or end_pos <= start_pos:
+            out.append(line)
+            continue
+        slope = (float(p2["value"]) - float(p1["value"])) / (end_pos - start_pos)
+        ref = float((abs(float(p1["value"])) + abs(float(p2["value"]))) / 2)
+        tol = _intraday_touch_band(ref)
+        extension_pos = end_pos
+        for pos in range(end_pos + 1, len(bars)):
+            projected = float(p1["value"]) + slope * (pos - start_pos)
+            if line["kind"] == "resistencia":
+                broke = highs[pos] > projected + tol * 0.5
+            else:
+                broke = lows[pos] < projected - tol * 0.5
+            extension_pos = pos
+            if broke:
+                break
+        if extension_pos > end_pos:
+            end_ts = int(bars.index[extension_pos].timestamp())
+            end_value = float(p1["value"]) + slope * (extension_pos - start_pos)
+            line = {
+                **line,
+                "breakout_points": [dict(item) for item in points],
+                "points": [
+                    dict(p1),
+                    {"time": end_ts, "value": round(float(end_value), 4)},
+                ],
+                "extended": True,
+            }
+        line = {
+            **line,
+            "draw_start_index": start_pos,
+            "draw_end_index": extension_pos,
+        }
+        out.append(line)
+    return _filter_retracement_intraday_lines(out)
+
+
+def _filter_retracement_intraday_lines(lines: list[dict]) -> list[dict]:
+    filtered = []
+    for line in lines:
+        if _is_minor_retracement_into_major_line(line, lines):
+            continue
+        filtered.append(line)
+    return filtered
+
+
+def _is_minor_retracement_into_major_line(line: dict,
+                                          lines: list[dict]) -> bool:
+    if line.get("kind") not in {"resistencia", "soporte"}:
+        return False
+    line_span = int(line.get("end_index", 0)) - int(line.get("start_index", 0))
+    if line_span <= 0 or line_span > 4:
+        return False
+    line_start = line.get("draw_start_index")
+    line_end = line.get("draw_end_index")
+    if line_start is None or line_end is None or line_end <= line_start:
+        return False
+    line_start_value = _line_value_at_position(line, int(line_start))
+    line_end_value = _line_value_at_position(line, int(line_end))
+    if line_start_value is None or line_end_value is None:
+        return False
+
+    for major in lines:
+        if major is line or major.get("kind") == line.get("kind"):
+            continue
+        major_span = int(major.get("end_index", 0)) - int(major.get("start_index", 0))
+        if major_span < max(line_span * 2, 8):
+            continue
+        major_start = major.get("draw_start_index")
+        major_end = major.get("draw_end_index")
+        if major_start is None or major_end is None:
+            continue
+        if not (int(major_start) <= int(line_start) <= int(major_end)):
+            continue
+        major_at_start = _line_value_at_position(major, int(line_start))
+        major_at_end = _line_value_at_position(major, int(line_end))
+        if major_at_start is None or major_at_end is None:
+            continue
+        start_gap = abs(float(line_start_value) - major_at_start)
+        end_gap = abs(float(line_end_value) - major_at_end)
+        tol = _intraday_touch_band((abs(float(line_end_value)) + abs(major_at_end)) / 2)
+        if end_gap <= tol * 2 and end_gap < start_gap:
+            return True
+    return False
+
+
+def _line_value_at_position(line: dict, position: int) -> float | None:
+    points = line.get("points") or []
+    if len(points) < 2:
+        return None
+    start = line.get("draw_start_index")
+    end = line.get("draw_end_index")
+    if start is None or end is None or int(end) == int(start):
+        return None
+    y1 = float(points[0]["value"])
+    y2 = float(points[-1]["value"])
+    return y1 + (y2 - y1) * ((position - int(start)) / (int(end) - int(start)))
 
 
 def _trendline_anchor_points(values: np.ndarray, kind: str) -> list[tuple[int, float]]:
@@ -591,6 +766,8 @@ def _select_swing_lines(lines: list[dict]) -> list[dict]:
     for line in ranked:
         if sum(1 for item in selected if item["kind"] == line["kind"]) >= 4:
             continue
+        if any(_same_swing_leg(line, item) for item in selected):
+            continue
         if any(_line_overlaps(line, item) for item in selected):
             continue
         selected.append(line)
@@ -601,7 +778,17 @@ def _swing_rank(line: dict) -> tuple:
     p1, p2 = line["points"]
     duration = int(p2["time"]) - int(p1["time"])
     move = abs(float(p2["value"]) - float(p1["value"]))
-    return (move, duration, int(line.get("touches", 0)))
+    slope = move / max(duration / (INTRADAY_TRENDLINE_MINUTES * 60), 1)
+    return (int(line.get("touches", 0)), duration, -slope, move)
+
+
+def _same_swing_leg(a: dict, b: dict) -> bool:
+    return (
+        a.get("kind") == b.get("kind")
+        and a.get("session_date") == b.get("session_date")
+        and a.get("leg_start_index") == b.get("leg_start_index")
+        and a.get("leg_end_index") == b.get("leg_end_index")
+    )
 
 
 def _line_overlaps(a: dict, b: dict) -> bool:
@@ -614,7 +801,8 @@ def _line_overlaps(a: dict, b: dict) -> bool:
     if shortest <= 0:
         return False
     price_gap = abs(float(a1["value"]) - float(b1["value"])) + abs(float(a2["value"]) - float(b2["value"]))
-    return overlap / shortest > 0.6 and price_gap < 1.0
+    ref = (abs(float(a1["value"])) + abs(float(a2["value"])) + abs(float(b1["value"])) + abs(float(b2["value"]))) / 4
+    return overlap / shortest > 0.5 and price_gap < max(ref * 0.003, 1.0)
 
 
 def _confirmed_breakouts(bars: pd.DataFrame, day: date,
@@ -631,7 +819,7 @@ def _confirmed_breakouts(bars: pd.DataFrame, day: date,
     for line in trendlines:
         if line.get("kind") not in {"resistencia", "soporte", "corte"}:
             continue
-        points = line.get("points") or []
+        points = line.get("breakout_points") or line.get("points") or []
         if len(points) < 2:
             continue
         for session_day, session in previous.groupby(previous.index.tz_convert(NY).date):

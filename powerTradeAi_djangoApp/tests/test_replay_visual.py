@@ -347,34 +347,6 @@ def test_lineas_intradia_usan_temporalidad_de_15m_y_tolerancia():
     assert all(line["label"].startswith("15m intradia") for line in lines)
 
 
-def test_lineas_intradia_no_cuentan_velas_consecutivas_como_tres_toques():
-    import pandas as pd
-    from datetime import date, datetime, timedelta
-
-    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
-    from powerTradeAi_djangoApp.engine.session import NY
-
-    replay_day = date(2026, 8, 10)
-    idx = pd.DatetimeIndex([
-        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
-        for i in range(8)
-    ]).tz_convert("UTC")
-    frame = pd.DataFrame({
-        "open":  [99, 100, 101, 102, 103, 104, 105, 106],
-        "high":  [101, 102, 103, 104, 105, 106, 107, 108],
-        "low":   [100, 101, 102, 103, 110, 111, 112, 113],
-        "close": [101, 102, 103, 104, 105, 106, 107, 108],
-        "volume": [100] * 8,
-    }, index=idx)
-
-    support_lines = [
-        line for line in _intraday_trendlines_15m(frame, replay_day)
-        if line["kind"] == "soporte"
-    ]
-
-    assert support_lines == []
-
-
 def test_lineas_intradia_rechazan_tendencias_menores_a_45_minutos():
     import pandas as pd
     from datetime import date, datetime, timedelta
@@ -385,14 +357,14 @@ def test_lineas_intradia_rechazan_tendencias_menores_a_45_minutos():
     replay_day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
         datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
-        for i in range(12)
+        for i in range(5)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
-        "open":  list(range(100, 112)),
-        "high":  list(range(101, 113)),
-        "low":   [100, 101, 103, 104, 105, 106, 106, 107, 108, 109, 110, 111],
-        "close": list(range(101, 113)),
-        "volume": [100] * 12,
+        "open":  [100, 101, 102, 103, 104],
+        "high":  [101, 102, 103, 104, 105],
+        "low":   [100, 101, 102, 110, 111],
+        "close": [101, 102, 103, 104, 105],
+        "volume": [100] * 5,
     }, index=idx)
 
     assert _intraday_trendlines_15m(frame, replay_day) == []
@@ -460,3 +432,130 @@ def test_lineas_intradia_detectan_impulsos_sin_pivotes_locales_clasicos():
     ]
 
     assert support_lines
+
+
+def test_lineas_intradia_priorizan_tramos_locales_sobre_lineas_largas():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(18)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open":  [100, 103, 106, 109, 108, 106, 104, 102, 101,
+                  102, 103, 104, 105, 106, 107, 108, 108, 108],
+        "high":  [101, 104, 107, 110, 109, 107, 105, 103, 102,
+                  103, 104, 105, 106, 107, 108, 109, 109, 109],
+        "low":   [99, 102, 105, 108, 106, 104, 102, 100, 99,
+                  100, 101, 102, 103, 104, 105, 106, 106, 106],
+        "close": [100, 103, 106, 109, 107, 105, 103, 101, 100,
+                  102, 103, 104, 105, 106, 107, 108, 108, 108],
+        "volume": [100] * 18,
+    }, index=idx)
+
+    resistance_lines = [
+        line for line in _intraday_trendlines_15m(frame, replay_day)
+        if line["kind"] == "resistencia"
+    ]
+
+    assert resistance_lines
+    assert all(line["end_index"] - line["start_index"] <= 16 for line in resistance_lines)
+
+
+def test_lineas_intradia_dejan_una_linea_por_pierna_del_movimiento():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(8)
+    ]).tz_convert("UTC")
+    lows = [100, 101, 102, 103, 104, 105, 106, 107]
+    frame = pd.DataFrame({
+        "open":  [price + 0.5 for price in lows],
+        "high":  [price + 1.0 for price in lows],
+        "low":   lows,
+        "close": [price + 0.8 for price in lows],
+        "volume": [100] * len(lows),
+    }, index=idx)
+
+    support_lines = [
+        line for line in _intraday_trendlines_15m(frame, replay_day)
+        if line["kind"] == "soporte"
+    ]
+
+    assert len(support_lines) == 1
+
+
+def test_lineas_intradia_continuan_al_siguiente_dia_hasta_romperse():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    first = [
+        datetime(2026, 8, 6, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(8)
+    ]
+    second = [
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(4)
+    ]
+    idx = pd.DatetimeIndex(first + second).tz_convert("UTC")
+    lows = [100, 101, 102, 103, 104, 105, 106, 107, 108.5, 109.5, 110.5, 106]
+    frame = pd.DataFrame({
+        "open":  [price + 0.5 for price in lows],
+        "high":  [price + 1.0 for price in lows],
+        "low":   lows,
+        "close": [price + 0.8 for price in lows],
+        "volume": [100] * len(lows),
+    }, index=idx)
+
+    support = next(
+        line for line in _intraday_trendlines_15m(frame, replay_day)
+        if line["kind"] == "soporte" and line["session_date"] == "2026-08-06"
+    )
+
+    assert support["extended"] is True
+    assert pd.Timestamp(support["points"][-1]["time"], unit="s", tz="UTC").tz_convert(NY).date() == date(2026, 8, 7)
+    assert support["breakout_points"][-1]["time"] < support["points"][-1]["time"]
+
+
+def test_lineas_intradia_omiten_retroceso_menor_hacia_tendencia_mayor():
+    from powerTradeAi_djangoApp.engine.replay import _filter_retracement_intraday_lines
+
+    major = {
+        "kind": "soporte",
+        "start_index": 0,
+        "end_index": 10,
+        "draw_start_index": 0,
+        "draw_end_index": 10,
+        "points": [
+            {"time": 1, "value": 100.0},
+            {"time": 2, "value": 110.0},
+        ],
+    }
+    minor = {
+        "kind": "resistencia",
+        "start_index": 6,
+        "end_index": 9,
+        "draw_start_index": 6,
+        "draw_end_index": 9,
+        "points": [
+            {"time": 3, "value": 111.0},
+            {"time": 4, "value": 109.05},
+        ],
+    }
+
+    assert _filter_retracement_intraday_lines([major, minor]) == [major]
