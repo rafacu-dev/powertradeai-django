@@ -45,3 +45,58 @@ def test_dashboard_enlaza_al_replay_visual():
     ruta = (Path(powerTradeAi_djangoApp.__file__).parent
             / "templates" / "powertradeai" / "dashboard.html")
     assert "powertradeai:replay" in ruta.read_text(encoding="utf-8")
+
+
+@pytest.mark.django_db
+def test_replay_timeline_grafica_15m_con_cinco_dias_previos_rth():
+    import pandas as pd
+    from datetime import date, datetime, time, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import replay_timeline
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    class Provider:
+        name = "fake"
+
+        def bars_1m(self, symbol, session_date):
+            return self._bars_for_days([session_date])
+
+        def bars(self, symbol, start, end, timeframe="1m"):
+            days = []
+            cursor = start
+            while cursor <= end:
+                if cursor.weekday() < 5:
+                    days.append(cursor)
+                cursor += timedelta(days=1)
+            return self._bars_for_days(days)
+
+        def _bars_for_days(self, days):
+            idx = []
+            for day in days:
+                for hh, mm in [(8, 0), (9, 30), (9, 31), (9, 45), (15, 45), (16, 0)]:
+                    idx.append(datetime.combine(day, time(hh, mm), tzinfo=NY))
+            utc = pd.DatetimeIndex(idx).tz_convert("UTC")
+            return pd.DataFrame({
+                "open": range(len(utc)),
+                "high": range(1, len(utc) + 1),
+                "low": range(len(utc)),
+                "close": range(len(utc)),
+                "volume": [100] * len(utc),
+            }, index=utc)
+
+    day = date(2026, 8, 10)
+    timeline = replay_timeline(day, "SPY", provider=Provider())
+
+    assert timeline.timeframe == "15m"
+    assert timeline.replay_start_time == int(
+        datetime.combine(day, time(9, 30), tzinfo=NY).timestamp())
+    local_times = [
+        datetime.fromtimestamp(candle["time"], tz=NY)
+        for candle in timeline.candles
+    ]
+    assert {ts.date() for ts in local_times} == {
+        date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5),
+        date(2026, 8, 6), date(2026, 8, 7), day,
+    }
+    assert all(time(9, 30) <= ts.time() < time(16, 0) for ts in local_times)
+    assert all(ts.minute in {0, 15, 30, 45} for ts in local_times)

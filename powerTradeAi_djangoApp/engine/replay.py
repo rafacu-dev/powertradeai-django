@@ -28,7 +28,7 @@ from django.utils import timezone
 from ..data import get_provider
 from ..models import Alert, ReplayRun, Strategy
 from ..strategies import ScanContext, get_strategy_class
-from .session import NY, is_trading_day, session_close
+from .session import NY, RTH_OPEN, is_trading_day, session_close
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +55,8 @@ class ReplayResult:
 class ReplayTimeline:
     day: date
     symbol: str
+    timeframe: str = "15m"
+    replay_start_time: int | None = None
     candles: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     strategies: list[str] = field(default_factory=list)
@@ -135,7 +137,9 @@ def replay_timeline(day: date, symbol: str, provider=None,
     provider = _SessionProvider(provider or get_provider(), day)
     bars = provider.bars_1m(symbol, day)
     timeline = ReplayTimeline(day=day, symbol=symbol)
-    timeline.candles = _candles_payload(bars)
+    display_bars = _display_bars_15m(provider, symbol, day)
+    timeline.candles = _candles_payload(display_bars)
+    timeline.replay_start_time = _first_replay_candle_time(display_bars, day)
     if bars.empty:
         return timeline
 
@@ -193,6 +197,53 @@ def _candles_payload(bars: pd.DataFrame) -> list[dict]:
             "close": float(row["close"]),
         })
     return rows
+
+
+def _display_bars_15m(provider, symbol: str, day: date) -> pd.DataFrame:
+    start = _previous_trading_days_start(day, count=5)
+    bars = provider.bars(symbol, start, day, "1m")
+    rth = _rth_only(bars)
+    if rth.empty:
+        return rth
+    out = rth.resample(
+        "15min", label="left", closed="left",
+        origin="start_day", offset="30min",
+    ).agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum",
+    }).dropna(subset=["close"])
+    return _rth_only(out)
+
+
+def _previous_trading_days_start(day: date, count: int) -> date:
+    cursor = day
+    found = 0
+    while found < count:
+        cursor -= timedelta(days=1)
+        if is_trading_day(cursor):
+            found += 1
+    return cursor
+
+
+def _rth_only(bars: pd.DataFrame) -> pd.DataFrame:
+    if bars is None or bars.empty:
+        return bars
+    local = bars.index.tz_convert(NY)
+    mask = []
+    for ts in local:
+        close = session_close(ts.date())
+        mask.append(RTH_OPEN <= ts.time() < close)
+    return bars[mask]
+
+
+def _first_replay_candle_time(bars: pd.DataFrame, day: date) -> int | None:
+    if bars.empty:
+        return None
+    local = bars.index.tz_convert(NY)
+    same_day = bars[local.date == day]
+    if same_day.empty:
+        return None
+    return int(same_day.index[0].timestamp())
 
 
 def _observation_event(strategy_id: str, ctx: ScanContext,

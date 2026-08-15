@@ -175,6 +175,8 @@ def replay_data(request):
     return JsonResponse({
         "date": str(timeline.day),
         "symbol": timeline.symbol,
+        "timeframe": timeline.timeframe,
+        "replay_start_time": timeline.replay_start_time,
         "candles": timeline.candles,
         "events": timeline.events,
         "strategies": timeline.strategies,

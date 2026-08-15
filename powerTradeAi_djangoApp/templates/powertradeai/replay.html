@@ -174,7 +174,7 @@ button:disabled { opacity: .55; cursor: default; }
     <aside class="side">
       <div class="side-head">
         <strong>Análisis de reglas</strong>
-        <span id="event-summary">Carga una sesión para ver el recorrido.</span>
+        <span id="event-summary">Carga una sesión para ver el recorrido en 15m.</span>
       </div>
       <div class="events" id="events">
         <div class="empty">Sin datos cargados.</div>
@@ -190,7 +190,7 @@ button:disabled { opacity: .55; cursor: default; }
   referrerpolicy="no-referrer"></script>
 <script>
 let chart, candles, markers = [];
-let allCandles = [], allEvents = [], cursor = 0, timer = null;
+let allCandles = [], allEvents = [], cursor = 0, timer = null, replayStartIndex = 0;
 
 function color(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -251,14 +251,16 @@ async function loadReplay() {
     ensureChart();
     allCandles = data.candles || [];
     allEvents = data.events || [];
-    cursor = Math.min(30, Math.max(0, allCandles.length - 1));
-    document.getElementById('scrubber').max = Math.max(0, allCandles.length - 1);
+    replayStartIndex = findReplayStartIndex(data.replay_start_time);
+    cursor = replayStartIndex;
+    document.getElementById('scrubber').min = replayStartIndex;
+    document.getElementById('scrubber').max = Math.max(replayStartIndex, allCandles.length - 1);
     document.getElementById('scrubber').disabled = allCandles.length === 0;
     document.getElementById('play-btn').disabled = allCandles.length === 0;
     document.getElementById('step-btn').disabled = allCandles.length === 0;
     renderEvents();
     draw();
-    status.textContent = `${data.date} · ${data.symbol} · ${allCandles.length} velas · ${allEvents.length} eventos`;
+    status.textContent = `${data.date} · ${data.symbol} · ${data.timeframe || '15m'} · ${allCandles.length} velas RTH · ${allEvents.length} eventos`;
     const signals = allEvents.filter(e => e.type === 'signal').length;
     document.getElementById('event-summary').textContent = `${data.strategies.length} regla(s), ${signals} señal(es).`;
   } catch (err) {
@@ -286,6 +288,12 @@ function draw() {
   document.getElementById('clock').textContent = fmtTime(currentTime);
   activateEvents(currentTime);
   if (cursor === allCandles.length - 1) stop();
+}
+function findReplayStartIndex(startTime) {
+  if (!allCandles.length) return 0;
+  if (!startTime) return 0;
+  const idx = allCandles.findIndex(c => c.time >= startTime);
+  return idx < 0 ? 0 : idx;
 }
 function renderEvents() {
   const box = document.getElementById('events');
@@ -321,7 +329,7 @@ function activateEvents(currentTime) {
 }
 function seekToTime(time) {
   const idx = allCandles.findIndex(c => c.time >= time);
-  cursor = idx < 0 ? allCandles.length - 1 : idx;
+  cursor = Math.max(replayStartIndex, idx < 0 ? allCandles.length - 1 : idx);
   draw();
 }
 function step() {
@@ -344,7 +352,7 @@ document.getElementById('load-btn').addEventListener('click', loadReplay);
 document.getElementById('play-btn').addEventListener('click', play);
 document.getElementById('step-btn').addEventListener('click', step);
 document.getElementById('scrubber').addEventListener('input', e => {
-  cursor = Number(e.target.value);
+  cursor = Math.max(replayStartIndex, Number(e.target.value));
   draw();
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
