@@ -337,7 +337,7 @@ function drawTrendlines() {
     });
     series.setData(line.points);
     trendlineSeries.push(series);
-    const label = `${line.timeframe} ${line.kind}`;
+    const label = `${line.timeframe}${line.scope === 'intradia' ? ' intradía' : ''} ${line.kind}`;
     if (!labels.has(label)) {
       labels.add(label);
       const item = document.createElement('span');
@@ -372,7 +372,7 @@ function renderTrendlineList() {
     const price = lineCurrentPrice(line);
     const row = document.createElement('tr');
     row.innerHTML =
-      `<td><span class="line-chip"><i style="background:${style.color}"></i>${escapeHtml(line.timeframe)} ${escapeHtml(line.kind)}</span></td>` +
+      `<td><span class="line-chip"><i style="background:${style.color}"></i>${escapeHtml(line.timeframe)}${line.scope === 'intradia' ? ' intradía' : ''} ${escapeHtml(line.kind)}</span></td>` +
       `<td>${escapeHtml(line.direction || '')}</td>` +
       `<td class="touches">${escapeHtml(line.touches ?? '')}</td>` +
       `<td class="price">${price == null ? '—' : price.toFixed(2)}</td>`;

@@ -238,3 +238,38 @@ def test_breakout_no_marca_el_dia_del_replay():
     }
 
     assert _confirmed_breakouts(frame, day, [line]) == []
+
+
+def test_lineas_intradia_detectan_tendencias_cortas_del_dia():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import (
+        _confirmed_breakouts, _intraday_trendlines_15m,
+    )
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(8)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open":  [100, 99, 98, 97, 96, 98, 99, 100],
+        "high":  [101, 100, 99, 98, 97, 100, 101, 102],
+        "low":   [98, 97, 96, 95, 94, 97, 98, 99],
+        "close": [99, 98, 97, 96, 95, 99, 100, 101],
+        "volume": [100] * 8,
+    }, index=idx)
+
+    lines = _intraday_trendlines_15m(frame, replay_day)
+
+    intraday_res = [
+        line for line in lines
+        if line["kind"] == "resistencia" and line.get("scope") == "intradia"
+    ]
+    assert intraday_res
+
+    breakouts = _confirmed_breakouts(frame, replay_day, intraday_res)
+    assert breakouts
+    assert breakouts[0]["time"] == int(idx[5].timestamp())

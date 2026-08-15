@@ -273,6 +273,7 @@ def _trendlines_payload(provider, symbol: str, day: date,
     for timeframe, bars, lookback in specs:
         frame = bars.tail(lookback) if bars is not None and not bars.empty else bars
         out.extend(_trendlines_for_frame(frame, timeframe, draw_start, draw_end))
+    out.extend(_intraday_trendlines_15m(display_bars, day))
     return out
 
 
@@ -434,6 +435,100 @@ def _horizontal_levels(points: list[tuple[int, float]], closes: np.ndarray) -> l
     return sorted(levels, key=lambda item: item["touches"], reverse=True)[:3]
 
 
+def _intraday_trendlines_15m(bars: pd.DataFrame, replay_day: date) -> list[dict]:
+    """Lineas cortas formadas dentro de cada sesion previa visible."""
+    if bars is None or bars.empty:
+        return []
+    previous = bars[bars.index.tz_convert(NY).date < replay_day]
+    if previous.empty:
+        return []
+    out: list[dict] = []
+    for _, session in previous.groupby(previous.index.tz_convert(NY).date):
+        out.extend(_session_micro_trendlines(session))
+    return out
+
+
+def _session_micro_trendlines(session: pd.DataFrame) -> list[dict]:
+    if len(session) < 5:
+        return []
+    lines: list[dict] = []
+    max_window = min(10, len(session))
+    for end in range(4, len(session)):
+        start = max(0, end - max_window + 1)
+        window = session.iloc[start:end + 1]
+        lines.extend(_micro_lines_for_window(window, start))
+    return _dedupe_micro_lines(lines)
+
+
+def _micro_lines_for_window(window: pd.DataFrame, offset: int) -> list[dict]:
+    highs = window["high"].astype(float).to_numpy()
+    lows = window["low"].astype(float).to_numpy()
+    candidates: list[dict] = []
+    candidates.extend(_fit_micro_line(window, highs, offset, "resistencia"))
+    candidates.extend(_fit_micro_line(window, lows, offset, "soporte"))
+    return candidates
+
+
+def _fit_micro_line(window: pd.DataFrame, values: np.ndarray, offset: int,
+                    kind: str) -> list[dict]:
+    out = []
+    n = len(values)
+    for i in range(0, n - 2):
+        for j in range(i + 2, n):
+            slope = (values[j] - values[i]) / (j - i)
+            if kind == "resistencia" and slope >= 0:
+                continue
+            if kind == "soporte" and slope <= 0:
+                continue
+            intercept = values[i] - slope * i
+            projected = np.array([slope * x + intercept for x in range(n)])
+            ref = float(np.median(values))
+            tol = max(ref * 0.0025, 0.01)
+            touches = int(np.count_nonzero(np.abs(values - projected) <= tol))
+            if touches < 3:
+                continue
+            out.append({
+                "timeframe": "15m",
+                "kind": kind,
+                "direction": "bajista" if kind == "resistencia" else "alcista",
+                "touches": touches,
+                "score": touches * 10 + (j - i),
+                "points": [
+                    {
+                        "time": int(window.index[i].timestamp()),
+                        "value": round(float(projected[i]), 4),
+                    },
+                    {
+                        "time": int(window.index[-1].timestamp()),
+                        "value": round(float(projected[-1]), 4),
+                    },
+                ],
+                "label": f"15m intradia {kind}",
+                "scope": "intradia",
+                "session_date": str(window.index[-1].tz_convert(NY).date()),
+                "start_index": offset + i,
+            })
+    return out
+
+
+def _dedupe_micro_lines(lines: list[dict]) -> list[dict]:
+    best: dict[tuple, dict] = {}
+    for line in lines:
+        p1, p2 = line["points"]
+        key = (
+            line["kind"],
+            p1["time"] // 900,
+            p2["time"] // 900,
+            round(float(p1["value"]), 1),
+            round(float(p2["value"]), 1),
+        )
+        current = best.get(key)
+        if current is None or line["score"] > current["score"]:
+            best[key] = line
+    ranked = sorted(best.values(), key=lambda item: item["score"], reverse=True)
+    return ranked[:8]
+
+
 def _confirmed_breakouts(bars: pd.DataFrame, day: date,
                          trendlines: list[dict]) -> list[dict]:
     """Circulos en los dias previos: ruptura de linea + vela de continuidad."""
@@ -451,7 +546,9 @@ def _confirmed_breakouts(bars: pd.DataFrame, day: date,
         points = line.get("points") or []
         if len(points) < 2:
             continue
-        for _, session in previous.groupby(previous.index.tz_convert(NY).date):
+        for session_day, session in previous.groupby(previous.index.tz_convert(NY).date):
+            if line.get("session_date") and line["session_date"] != str(session_day):
+                continue
             if len(session) < 3:
                 continue
             found = _first_confirmed_breakout_in_session(session, line, points)
