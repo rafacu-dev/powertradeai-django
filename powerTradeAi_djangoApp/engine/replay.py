@@ -449,12 +449,14 @@ def _intraday_trendlines_15m(bars: pd.DataFrame, replay_day: date) -> list[dict]
     """Lineas intradia calculadas con swings de 15 minutos y tolerancia."""
     if bars is None or bars.empty:
         return []
-    previous = bars[bars.index.tz_convert(NY).date < replay_day]
-    if previous.empty:
+    available = bars[bars.index.tz_convert(NY).date <= replay_day]
+    if available.empty:
         return []
     out = []
-    for _, session in previous.groupby(previous.index.tz_convert(NY).date):
+    for _, session in available.groupby(available.index.tz_convert(NY).date):
         out.extend(_session_micro_trendlines(session))
+    for line in out:
+        line["replay_day"] = line.get("session_date") == str(replay_day)
     return _extend_continuing_intraday_lines(out, bars)
 
 

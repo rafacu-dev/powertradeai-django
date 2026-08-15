@@ -328,7 +328,6 @@ async function loadReplay() {
     document.getElementById('play-btn').disabled = allCandles.length === 0;
     document.getElementById('step-btn').disabled = allCandles.length === 0;
     renderEvents();
-    drawTrendlines();
     renderTrendlineList();
     draw();
     status.textContent = `${data.date} · ${data.symbol} · ${data.timeframe || '15m'} · ${allCandles.length} velas RTH · ${allEvents.length} eventos`;
@@ -340,7 +339,7 @@ async function loadReplay() {
     document.getElementById('loading').style.display = 'none';
   }
 }
-function drawTrendlines() {
+function drawTrendlines(currentTime = null) {
   if (!chart) return;
   trendlineSeries.forEach(series => chart.removeSeries(series));
   trendlineSeries = [];
@@ -349,7 +348,8 @@ function drawTrendlines() {
   const labels = new Set();
   allTrendlines.forEach(line => {
     if (line.scope !== 'intradia') return;
-    if (!line.points || line.points.length < 2) return;
+    const points = visibleTrendlinePoints(line, currentTime);
+    if (!points) return;
     const style = trendlineStyle(line);
     const series = chart.addLineSeries({
       color: style.color,
@@ -360,7 +360,7 @@ function drawTrendlines() {
       crosshairMarkerVisible: false,
       title: line.label || '',
     });
-    series.setData(line.points);
+    series.setData(points);
     trendlineSeries.push(series);
     const label = `${line.timeframe}${line.scope === 'intradia' ? ' intradía' : ''} ${line.kind}`;
     if (!labels.has(label)) {
@@ -372,6 +372,28 @@ function drawTrendlines() {
       legend.appendChild(item);
     }
   });
+}
+function visibleTrendlinePoints(line, currentTime) {
+  if (!line.points || line.points.length < 2) return null;
+  if (!currentTime || !line.replay_day) return line.points;
+  const p1 = line.points[0];
+  const p2 = line.points[line.points.length - 1];
+  if (p1.time > currentTime) return null;
+  if (currentTime - p1.time < 45 * 60) return null;
+  if (p2.time <= currentTime) return line.points;
+  return [
+    p1,
+    {
+      time: currentTime,
+      value: Number(lineValueAtTime(line.points, currentTime).toFixed(4)),
+    },
+  ];
+}
+function lineValueAtTime(points, time) {
+  const p1 = points[0];
+  const p2 = points[points.length - 1];
+  if (p2.time === p1.time) return Number(p2.value);
+  return Number(p1.value) + (Number(p2.value) - Number(p1.value)) * ((time - p1.time) / (p2.time - p1.time));
 }
 function lineCurrentPrice(line) {
   if (!line.points || !line.points.length) return null;
@@ -411,6 +433,7 @@ function draw() {
   const visible = allCandles.slice(0, cursor + 1);
   candles.setData(visible);
   const currentTime = visible.length ? visible[visible.length - 1].time : null;
+  drawTrendlines(currentTime);
   markers = allEvents
     .filter(e => e.type === 'signal' && e.time <= currentTime)
     .map(e => ({

@@ -496,6 +496,33 @@ def test_lineas_intradia_dejan_una_linea_por_pierna_del_movimiento():
     assert len(support_lines) == 1
 
 
+def test_lineas_intradia_incluyen_dia_del_replay_marcado_para_playback():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 10, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(8)
+    ]).tz_convert("UTC")
+    lows = [100, 101, 102, 103, 104, 105, 106, 107]
+    frame = pd.DataFrame({
+        "open":  [price + 0.5 for price in lows],
+        "high":  [price + 1.0 for price in lows],
+        "low":   lows,
+        "close": [price + 0.8 for price in lows],
+        "volume": [100] * len(lows),
+    }, index=idx)
+
+    lines = _intraday_trendlines_15m(frame, replay_day)
+
+    assert lines
+    assert all(line["replay_day"] is True for line in lines)
+
+
 def test_lineas_intradia_continuan_al_siguiente_dia_hasta_romperse():
     import pandas as pd
     from datetime import date, datetime, timedelta
