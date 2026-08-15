@@ -34,9 +34,8 @@ from .session import NY, RTH_OPEN, is_trading_day, session_close
 log = logging.getLogger(__name__)
 
 RTH_FIRST_DECISION = "09:31"   # antes no hay ninguna vela cerrada
-INTRADAY_TRENDLINE_MINUTES = 3
+INTRADAY_TRENDLINE_MINUTES = 15
 INTRADAY_TRENDLINE_MIN_DURATION = 45 * 60
-INTRADAY_TRENDLINE_MIN_BARS_BETWEEN_TOUCHES = 2
 INTRADAY_TRENDLINE_TOUCH_BAND_BPS = 18
 
 
@@ -145,11 +144,9 @@ def replay_timeline(day: date, symbol: str, provider=None,
     bars = provider.bars_1m(symbol, day)
     timeline = ReplayTimeline(day=day, symbol=symbol)
     display_bars = _display_bars_15m(provider, symbol, day)
-    intraday_bars = _intraday_bars_3m(provider, symbol, day)
     timeline.candles = _candles_payload(display_bars)
     timeline.replay_start_time = _first_replay_candle_time(display_bars, day)
-    timeline.trendlines = _trendlines_payload(
-        provider, symbol, day, display_bars, intraday_bars)
+    timeline.trendlines = _trendlines_payload(provider, symbol, day, display_bars)
     timeline.breakouts = _confirmed_breakouts(display_bars, day, timeline.trendlines)
     if bars.empty:
         return timeline
@@ -214,12 +211,6 @@ def _display_bars_15m(provider, symbol: str, day: date) -> pd.DataFrame:
     start = _previous_trading_days_start(day, count=5)
     bars = provider.bars(symbol, start, day, "1m")
     return _resample_intraday_bars(bars, "15min")
-
-
-def _intraday_bars_3m(provider, symbol: str, day: date) -> pd.DataFrame:
-    start = _previous_trading_days_start(day, count=5)
-    bars = provider.bars(symbol, start, day, "1m")
-    return _resample_intraday_bars(bars, f"{INTRADAY_TRENDLINE_MINUTES}min")
 
 
 def _resample_intraday_bars(bars: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -292,7 +283,7 @@ def _trendlines_payload(provider, symbol: str, day: date,
         out.extend(_trendlines_for_frame(frame, timeframe, draw_start, draw_end))
     if intraday_bars is None or intraday_bars.empty:
         intraday_bars = display_bars
-    out.extend(_intraday_trendlines_3m(intraday_bars, day))
+    out.extend(_intraday_trendlines_15m(intraday_bars, day))
     return out
 
 
@@ -427,8 +418,6 @@ def _line_payload(line: dict, start_time: int, end_time: int,
 
 def _timeframe_seconds(timeframe: str) -> int:
     return {
-        "3m": 3 * 60,
-        "5m": 5 * 60,
         "15m": 15 * 60,
         "1h": 60 * 60,
         "1d": 24 * 60 * 60,
@@ -457,15 +446,7 @@ def _horizontal_levels(points: list[tuple[int, float]], closes: np.ndarray) -> l
 
 
 def _intraday_trendlines_15m(bars: pd.DataFrame, replay_day: date) -> list[dict]:
-    return _intraday_trendlines_3m(bars, replay_day)
-
-
-def _intraday_trendlines_5m(bars: pd.DataFrame, replay_day: date) -> list[dict]:
-    return _intraday_trendlines_3m(bars, replay_day)
-
-
-def _intraday_trendlines_3m(bars: pd.DataFrame, replay_day: date) -> list[dict]:
-    """Lineas intradia calculadas con swings de 3 minutos y duracion minima."""
+    """Lineas intradia calculadas con swings de 15 minutos y tolerancia."""
     if bars is None or bars.empty:
         return []
     previous = bars[bars.index.tz_convert(NY).date < replay_day]
@@ -527,9 +508,6 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
             touches = len(touch_zones)
             if touches < 3:
                 continue
-            if not _touch_zones_have_spacing(
-                touch_zones, INTRADAY_TRENDLINE_MIN_BARS_BETWEEN_TOUCHES):
-                continue
             first_touch, last_touch = touch_zones[0][0], touch_zones[-1][-1]
             touch_duration = (
                 int(session.index[i + last_touch].timestamp())
@@ -540,7 +518,7 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
             end_index = min(len(session) - 1, j + max(2, span))
             end_value = slope * end_index + intercept
             out.append({
-                "timeframe": "3m",
+                "timeframe": "15m",
                 "kind": kind,
                 "direction": "bajista" if kind == "resistencia" else "alcista",
                 "touches": touches,
@@ -555,7 +533,7 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
                         "value": round(float(end_value), 4),
                     },
                 ],
-                "label": f"3m intradia {kind}",
+                "label": f"15m intradia {kind}",
                 "scope": "intradia",
                 "session_date": str(session.index[-1].tz_convert(NY).date()),
                 "start_index": i,
@@ -576,14 +554,6 @@ def _touch_zones(touch_idx: np.ndarray) -> list[list[int]]:
         else:
             zones.append([idx])
     return zones
-
-
-def _touch_zones_have_spacing(zones: list[list[int]], min_between: int) -> bool:
-    for prev, current in zip(zones, zones[1:]):
-        intermediate_bars = current[0] - prev[-1] - 1
-        if intermediate_bars < min_between:
-            return False
-    return True
 
 
 def _trendline_anchor_points(values: np.ndarray, kind: str) -> list[tuple[int, float]]:

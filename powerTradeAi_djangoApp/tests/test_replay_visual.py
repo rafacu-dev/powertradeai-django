@@ -311,16 +311,16 @@ def test_lineas_intradia_se_limitan_a_pocas_por_tipo_en_la_sesion():
     assert len([line for line in intraday if line["kind"] == "soporte"]) <= 2
 
 
-def test_lineas_intradia_usan_temporalidad_de_3m_y_duran_45_minutos():
+def test_lineas_intradia_usan_temporalidad_de_15m_y_tolerancia():
     import pandas as pd
     from datetime import date, datetime, timedelta
 
-    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
     from powerTradeAi_djangoApp.engine.session import NY
 
     replay_day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
-        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
         for i in range(21)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
@@ -335,28 +335,28 @@ def test_lineas_intradia_usan_temporalidad_de_3m_y_duran_45_minutos():
         "volume": [100] * 21,
     }, index=idx)
 
-    lines = _intraday_trendlines_3m(frame, replay_day)
+    lines = _intraday_trendlines_15m(frame, replay_day)
 
     assert lines
-    assert all(line["timeframe"] == "3m" for line in lines)
+    assert all(line["timeframe"] == "15m" for line in lines)
     assert all(line["touches"] >= 3 for line in lines)
     assert all(
         line["points"][-1]["time"] - line["points"][0]["time"] >= 45 * 60
         for line in lines
     )
-    assert all(line["label"].startswith("3m intradia") for line in lines)
+    assert all(line["label"].startswith("15m intradia") for line in lines)
 
 
 def test_lineas_intradia_no_cuentan_velas_consecutivas_como_tres_toques():
     import pandas as pd
     from datetime import date, datetime, timedelta
 
-    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
     from powerTradeAi_djangoApp.engine.session import NY
 
     replay_day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
-        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
         for i in range(8)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
@@ -368,7 +368,7 @@ def test_lineas_intradia_no_cuentan_velas_consecutivas_como_tres_toques():
     }, index=idx)
 
     support_lines = [
-        line for line in _intraday_trendlines_3m(frame, replay_day)
+        line for line in _intraday_trendlines_15m(frame, replay_day)
         if line["kind"] == "soporte"
     ]
 
@@ -379,12 +379,12 @@ def test_lineas_intradia_rechazan_tendencias_menores_a_45_minutos():
     import pandas as pd
     from datetime import date, datetime, timedelta
 
-    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
     from powerTradeAi_djangoApp.engine.session import NY
 
     replay_day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
-        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
         for i in range(12)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
@@ -395,43 +395,19 @@ def test_lineas_intradia_rechazan_tendencias_menores_a_45_minutos():
         "volume": [100] * 12,
     }, index=idx)
 
-    assert _intraday_trendlines_3m(frame, replay_day) == []
-
-
-def test_lineas_intradia_exigen_dos_velas_intermedias_entre_toques():
-    import pandas as pd
-    from datetime import date, datetime, timedelta
-
-    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
-    from powerTradeAi_djangoApp.engine.session import NY
-
-    replay_day = date(2026, 8, 10)
-    idx = pd.DatetimeIndex([
-        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
-        for i in range(21)
-    ]).tz_convert("UTC")
-    frame = pd.DataFrame({
-        "open":  list(range(100, 121)),
-        "high":  list(range(101, 122)),
-        "low":   [100, 101, 101, 103, 104, 105, 106, 107, 108, 109,
-                  110, 111, 112, 113, 114, 115, 116, 112, 118, 119, 120],
-        "close": list(range(101, 122)),
-        "volume": [100] * 21,
-    }, index=idx)
-
-    assert _intraday_trendlines_3m(frame, replay_day) == []
+    assert _intraday_trendlines_15m(frame, replay_day) == []
 
 
 def test_lineas_intradia_aceptan_toques_dentro_del_grosor_de_banda():
     import pandas as pd
     from datetime import date, datetime, timedelta
 
-    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
     from powerTradeAi_djangoApp.engine.session import NY
 
     replay_day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
-        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
         for i in range(21)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
@@ -445,7 +421,7 @@ def test_lineas_intradia_aceptan_toques_dentro_del_grosor_de_banda():
     }, index=idx)
 
     support_lines = [
-        line for line in _intraday_trendlines_3m(frame, replay_day)
+        line for line in _intraday_trendlines_15m(frame, replay_day)
         if line["kind"] == "soporte"
     ]
 
@@ -456,12 +432,12 @@ def test_lineas_intradia_detectan_impulsos_sin_pivotes_locales_clasicos():
     import pandas as pd
     from datetime import date, datetime, timedelta
 
-    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_15m
     from powerTradeAi_djangoApp.engine.session import NY
 
     replay_day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
-        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
         for i in range(24)
     ]).tz_convert("UTC")
     lows = [
@@ -479,7 +455,7 @@ def test_lineas_intradia_detectan_impulsos_sin_pivotes_locales_clasicos():
     }, index=idx)
 
     support_lines = [
-        line for line in _intraday_trendlines_3m(frame, replay_day)
+        line for line in _intraday_trendlines_15m(frame, replay_day)
         if line["kind"] == "soporte"
     ]
 
