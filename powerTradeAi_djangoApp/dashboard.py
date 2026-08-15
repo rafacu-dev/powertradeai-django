@@ -179,6 +179,7 @@ def replay_data(request):
         "replay_start_time": timeline.replay_start_time,
         "candles": timeline.candles,
         "trendlines": timeline.trendlines,
+        "breakouts": timeline.breakouts,
         "events": timeline.events,
         "strategies": timeline.strategies,
         "errors": [{"strategy_id": s, "detail": d} for s, d in timeline.errors],

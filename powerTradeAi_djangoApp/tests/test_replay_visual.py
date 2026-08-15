@@ -134,3 +134,43 @@ def test_trendlines_devuelven_lineas_dibujables():
         assert line["timeframe"] == "15m"
         assert len(line["points"]) == 2
         assert all("time" in point and "value" in point for point in line["points"])
+
+
+def test_breakout_confirmado_marca_la_vela_siguiente():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _confirmed_breakouts
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 10, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(4)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open": [99, 100, 102, 104],
+        "high": [100, 103, 105, 106],
+        "low": [98, 99, 101, 103],
+        "close": [99, 102, 104, 105],
+        "volume": [100] * 4,
+    }, index=idx)
+    line = {
+        "timeframe": "15m", "kind": "resistencia",
+        "points": [
+            {"time": int(idx[0].timestamp()), "value": 100},
+            {"time": int(idx[-1].timestamp()), "value": 100},
+        ],
+    }
+
+    out = _confirmed_breakouts(frame, day, [line])
+
+    assert out == [{
+        "time": int(idx[2].timestamp()),
+        "direction": "CALL",
+        "price": 104.0,
+        "line_price": 100.0,
+        "timeframe": "15m",
+        "kind": "resistencia",
+        "label": "Confirmacion CALL 15m resistencia",
+    }]

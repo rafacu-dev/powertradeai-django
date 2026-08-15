@@ -60,6 +60,7 @@ class ReplayTimeline:
     replay_start_time: int | None = None
     candles: list[dict] = field(default_factory=list)
     trendlines: list[dict] = field(default_factory=list)
+    breakouts: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     strategies: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
@@ -143,6 +144,7 @@ def replay_timeline(day: date, symbol: str, provider=None,
     timeline.candles = _candles_payload(display_bars)
     timeline.replay_start_time = _first_replay_candle_time(display_bars, day)
     timeline.trendlines = _trendlines_payload(provider, symbol, day, display_bars)
+    timeline.breakouts = _confirmed_breakouts(display_bars, day, timeline.trendlines)
     if bars.empty:
         return timeline
 
@@ -430,6 +432,89 @@ def _horizontal_levels(points: list[tuple[int, float]], closes: np.ndarray) -> l
         for cluster in clusters if len(cluster) >= 3
     ]
     return sorted(levels, key=lambda item: item["touches"], reverse=True)[:3]
+
+
+def _confirmed_breakouts(bars: pd.DataFrame, day: date,
+                         trendlines: list[dict]) -> list[dict]:
+    """Circulos para ruptura de linea + vela siguiente de continuidad."""
+    if bars is None or bars.empty or len(bars) < 3:
+        return []
+    local = bars.index.tz_convert(NY)
+    session = bars[local.date == day]
+    if len(session) < 3:
+        return []
+
+    out = []
+    for line in trendlines:
+        if line.get("kind") not in {"resistencia", "soporte"}:
+            continue
+        points = line.get("points") or []
+        if len(points) < 2:
+            continue
+        for i in range(1, len(session) - 1):
+            prev = session.iloc[i - 1]
+            current = session.iloc[i]
+            confirm = session.iloc[i + 1]
+            current_ts = int(session.index[i].timestamp())
+            confirm_ts = int(session.index[i + 1].timestamp())
+            prev_ts = int(session.index[i - 1].timestamp())
+            prev_level = _line_value_at(points, prev_ts)
+            current_level = _line_value_at(points, current_ts)
+            confirm_level = _line_value_at(points, confirm_ts)
+            if None in (prev_level, current_level, confirm_level):
+                continue
+
+            if (
+                line["kind"] == "resistencia"
+                and float(prev["close"]) <= prev_level
+                and float(current["close"]) > current_level
+                and float(confirm["close"]) > confirm_level
+                and float(confirm["close"]) > float(current["close"])
+            ):
+                out.append(_breakout_payload(
+                    line, confirm_ts, "CALL", float(confirm["close"]),
+                    confirm_level))
+                break
+            if (
+                line["kind"] == "soporte"
+                and float(prev["close"]) >= prev_level
+                and float(current["close"]) < current_level
+                and float(confirm["close"]) < confirm_level
+                and float(confirm["close"]) < float(current["close"])
+            ):
+                out.append(_breakout_payload(
+                    line, confirm_ts, "PUT", float(confirm["close"]),
+                    confirm_level))
+                break
+    return out
+
+
+def _line_value_at(points: list[dict], ts: int) -> float | None:
+    try:
+        p1, p2 = points[0], points[-1]
+        t1, t2 = int(p1["time"]), int(p2["time"])
+        y1, y2 = float(p1["value"]), float(p2["value"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if t2 == t1:
+        return y2
+    return y1 + (y2 - y1) * ((ts - t1) / (t2 - t1))
+
+
+def _breakout_payload(line: dict, ts: int, direction: str,
+                      close: float, level: float) -> dict:
+    return {
+        "time": ts,
+        "direction": direction,
+        "price": round(close, 4),
+        "line_price": round(level, 4),
+        "timeframe": line.get("timeframe"),
+        "kind": line.get("kind"),
+        "label": (
+            f"Confirmacion {direction} {line.get('timeframe')} "
+            f"{line.get('kind')}"
+        ),
+    }
 
 
 def _observation_event(strategy_id: str, ctx: ScanContext,

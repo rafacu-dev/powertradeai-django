@@ -227,7 +227,7 @@ button:disabled { opacity: .55; cursor: default; }
   referrerpolicy="no-referrer"></script>
 <script>
 let chart, candles, markers = [];
-let allCandles = [], allEvents = [], allTrendlines = [], trendlineSeries = [];
+let allCandles = [], allEvents = [], allTrendlines = [], allBreakouts = [], trendlineSeries = [];
 let cursor = 0, timer = null, replayStartIndex = 0;
 
 function color(name) {
@@ -295,6 +295,7 @@ async function loadReplay() {
     allCandles = data.candles || [];
     allEvents = data.events || [];
     allTrendlines = data.trendlines || [];
+    allBreakouts = data.breakouts || [];
     replayStartIndex = findReplayStartIndex(data.replay_start_time);
     cursor = replayStartIndex;
     document.getElementById('scrubber').min = replayStartIndex;
@@ -308,7 +309,7 @@ async function loadReplay() {
     draw();
     status.textContent = `${data.date} · ${data.symbol} · ${data.timeframe || '15m'} · ${allCandles.length} velas RTH · ${allEvents.length} eventos`;
     const signals = allEvents.filter(e => e.type === 'signal').length;
-    document.getElementById('event-summary').textContent = `${data.strategies.length} regla(s), ${signals} señal(es), ${allTrendlines.length} línea(s).`;
+    document.getElementById('event-summary').textContent = `${data.strategies.length} regla(s), ${signals} señal(es), ${allTrendlines.length} línea(s), ${allBreakouts.length} ruptura(s).`;
   } catch (err) {
     status.textContent = 'Error: ' + err.message;
   } finally {
@@ -394,6 +395,15 @@ function draw() {
       shape: e.direction === 'PUT' ? 'arrowDown' : 'arrowUp',
       text: e.strategy_id,
     }));
+  markers.push(...allBreakouts
+    .filter(b => b.time <= currentTime)
+    .map(b => ({
+      time: b.time,
+      position: b.direction === 'PUT' ? 'aboveBar' : 'belowBar',
+      color: b.direction === 'PUT' ? '#e03131' : '#0ca678',
+      shape: 'circle',
+      text: b.direction === 'PUT' ? '↓ ruptura' : '↑ ruptura',
+    })));
   candles.setMarkers(markers);
   document.getElementById('scrubber').value = cursor;
   document.getElementById('clock').textContent = fmtTime(currentTime);
