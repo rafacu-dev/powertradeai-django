@@ -20,6 +20,10 @@ from .models import Alert, Strategy
 
 log = logging.getLogger(__name__)
 
+REPLAY_DEFAULT_SYMBOLS = (
+    "AMZN", "GOOGL", "TSLA", "AAPL", "NVDA", "MSFT", "QQQ", "SPY",
+)
+
 
 @staff_member_required
 @require_GET
@@ -132,11 +136,13 @@ def replay_action(request):
 @staff_member_required
 @require_GET
 def replay_view(request):
-    strategies = Strategy.objects.filter(enabled=True).order_by("symbol", "strategy_id")
-    symbols = sorted(set(strategies.values_list("symbol", flat=True)))
+    strategies = Strategy.objects.all().order_by("symbol", "strategy_id")
+    symbols = sorted(
+        set(REPLAY_DEFAULT_SYMBOLS) | set(strategies.values_list("symbol", flat=True)))
     return render(request, "powertradeai/replay.html", {
         "symbols": symbols,
         "strategies": strategies,
+        "default_symbols": REPLAY_DEFAULT_SYMBOLS,
     })
 
 
