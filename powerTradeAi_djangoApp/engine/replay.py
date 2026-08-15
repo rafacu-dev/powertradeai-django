@@ -513,9 +513,9 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
                 violation = np.max(projected - segment)
             if float(violation) > tol * 3:
                 continue
-            touches = 2 + int(np.count_nonzero(
-                np.abs(segment - projected) <= tol)) - 2
-            touches = max(2, touches)
+            touches = int(np.count_nonzero(np.abs(segment - projected) <= tol))
+            if touches < 3:
+                continue
             end_index = min(len(session) - 1, j + max(2, span))
             end_value = slope * end_index + intercept
             out.append({
