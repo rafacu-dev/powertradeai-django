@@ -451,94 +451,126 @@ def _intraday_trendlines_15m(bars: pd.DataFrame, replay_day: date) -> list[dict]
 def _session_micro_trendlines(session: pd.DataFrame) -> list[dict]:
     if len(session) < 5:
         return []
-    lines: list[dict] = []
-    max_window = min(14, len(session))
-    for end in range(5, len(session)):
-        start = max(0, end - max_window + 1)
-        window = session.iloc[start:end + 1]
-        lines.extend(_micro_lines_for_window(window, session, start))
-    return _select_session_micro_lines(lines)
+    highs = session["high"].astype(float).to_numpy()
+    lows = session["low"].astype(float).to_numpy()
+    candidates = []
+    candidates.extend(_swing_trendlines(session, highs, "resistencia"))
+    candidates.extend(_swing_trendlines(session, lows, "soporte"))
+    return _select_swing_lines(candidates)
 
 
-def _micro_lines_for_window(window: pd.DataFrame, session: pd.DataFrame,
-                            offset: int) -> list[dict]:
-    highs = window["high"].astype(float).to_numpy()
-    lows = window["low"].astype(float).to_numpy()
-    candidates: list[dict] = []
-    candidates.extend(_fit_micro_line(window, session, highs, offset, "resistencia"))
-    candidates.extend(_fit_micro_line(window, session, lows, offset, "soporte"))
-    return candidates
-
-
-def _fit_micro_line(window: pd.DataFrame, session: pd.DataFrame,
-                    values: np.ndarray, offset: int, kind: str) -> list[dict]:
+def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
+                      kind: str) -> list[dict]:
+    pivots = _swing_points(values, kind)
+    if len(pivots) < 2:
+        return []
+    ref = float(np.median(values))
+    min_move = max(ref * 0.0015, 0.05)
+    tol = max(ref * 0.0012, 0.03)
     out = []
-    n = len(values)
-    session_end = len(session) - 1
-    for i in range(0, n - 2):
-        for j in range(i + 2, n):
+    for left in range(len(pivots) - 1):
+        for right in range(left + 1, len(pivots)):
+            i, y1 = pivots[left]
+            j, y2 = pivots[right]
             span = j - i
-            if span < 4:
+            if span < 2:
                 continue
-            slope = (values[j] - values[i]) / (j - i)
+            move = abs(y2 - y1)
+            if move < min_move:
+                continue
+            slope = (y2 - y1) / span
             if kind == "resistencia" and slope >= 0:
                 continue
             if kind == "soporte" and slope <= 0:
                 continue
-            intercept = values[i] - slope * i
-            projected = np.array([slope * x + intercept for x in range(n)])
-            ref = float(np.median(values))
-            tol = max(ref * 0.0025, 0.01)
-            touch_idx = np.flatnonzero(np.abs(values - projected) <= tol)
-            touches = int(len(touch_idx))
-            if touches < 3:
+            intercept = y1 - slope * i
+            xs = np.arange(i, j + 1, dtype=float)
+            projected = slope * xs + intercept
+            segment = values[i:j + 1]
+            if kind == "resistencia":
+                violation = np.max(segment - projected)
+            else:
+                violation = np.max(projected - segment)
+            if float(violation) > tol * 3:
                 continue
-            first_touch = int(touch_idx[0])
-            last_touch = int(touch_idx[-1])
-            if last_touch - first_touch < 4:
-                continue
-            session_x2 = session_end - offset
-            line_end = slope * session_x2 + intercept
+            touches = 2 + int(np.count_nonzero(
+                np.abs(segment - projected) <= tol)) - 2
+            touches = max(2, touches)
+            end_index = min(len(session) - 1, j + max(2, span))
+            end_value = slope * end_index + intercept
             out.append({
                 "timeframe": "15m",
                 "kind": kind,
                 "direction": "bajista" if kind == "resistencia" else "alcista",
                 "touches": touches,
-                "score": touches * 100 + span * 10 + (n - j),
+                "score": round(float(move), 4),
                 "points": [
                     {
-                        "time": int(window.index[i].timestamp()),
-                        "value": round(float(projected[i]), 4),
+                        "time": int(session.index[i].timestamp()),
+                        "value": round(float(y1), 4),
                     },
                     {
-                        "time": int(session.index[-1].timestamp()),
-                        "value": round(float(line_end), 4),
+                        "time": int(session.index[end_index].timestamp()),
+                        "value": round(float(end_value), 4),
                     },
                 ],
                 "label": f"15m intradia {kind}",
                 "scope": "intradia",
-                "session_date": str(window.index[-1].tz_convert(NY).date()),
-                "start_index": offset + i,
+                "session_date": str(session.index[-1].tz_convert(NY).date()),
+                "start_index": i,
+                "end_index": end_index,
             })
     return out
 
 
-def _select_session_micro_lines(lines: list[dict]) -> list[dict]:
-    """Deja solo las lineas intradia principales de la sesion."""
-    best: dict[str, dict] = {}
-    for line in lines:
-        key = line["kind"]
-        current = best.get(key)
-        if current is None or _micro_rank(line) > _micro_rank(current):
-            best[key] = line
-    return sorted(best.values(), key=lambda item: item["kind"])
+def _swing_points(values: np.ndarray, kind: str) -> list[tuple[int, float]]:
+    pivots: list[tuple[int, float]] = []
+    n = len(values)
+    if n <= 14:
+        return [(i, float(values[i])) for i in range(n)]
+    for i in range(n):
+        left = max(0, i - 1)
+        right = min(n, i + 2)
+        window = values[left:right]
+        value = float(values[i])
+        if kind == "resistencia":
+            if value >= float(window.max()):
+                pivots.append((i, value))
+        elif value <= float(window.min()):
+            pivots.append((i, value))
+    return pivots
 
 
-def _micro_rank(line: dict) -> tuple:
+def _select_swing_lines(lines: list[dict]) -> list[dict]:
+    selected: list[dict] = []
+    ranked = sorted(lines, key=_swing_rank, reverse=True)
+    for line in ranked:
+        if sum(1 for item in selected if item["kind"] == line["kind"]) >= 2:
+            continue
+        if any(_line_overlaps(line, item) for item in selected):
+            continue
+        selected.append(line)
+    return sorted(selected, key=lambda item: (item["points"][0]["time"], item["kind"]))
+
+
+def _swing_rank(line: dict) -> tuple:
     p1, p2 = line["points"]
     duration = int(p2["time"]) - int(p1["time"])
     move = abs(float(p2["value"]) - float(p1["value"]))
-    return (int(line.get("touches", 0)), duration, move, int(line.get("score", 0)))
+    return (move, duration, int(line.get("touches", 0)))
+
+
+def _line_overlaps(a: dict, b: dict) -> bool:
+    if a["kind"] != b["kind"]:
+        return False
+    a1, a2 = a["points"]
+    b1, b2 = b["points"]
+    overlap = min(int(a2["time"]), int(b2["time"])) - max(int(a1["time"]), int(b1["time"]))
+    shortest = min(int(a2["time"]) - int(a1["time"]), int(b2["time"]) - int(b1["time"]))
+    if shortest <= 0:
+        return False
+    price_gap = abs(float(a1["value"]) - float(b1["value"])) + abs(float(a2["value"]) - float(b2["value"]))
+    return overlap / shortest > 0.6 and price_gap < 1.0
 
 
 def _confirmed_breakouts(bars: pd.DataFrame, day: date,
