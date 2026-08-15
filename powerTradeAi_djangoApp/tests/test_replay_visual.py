@@ -450,3 +450,37 @@ def test_lineas_intradia_aceptan_toques_dentro_del_grosor_de_banda():
     ]
 
     assert support_lines
+
+
+def test_lineas_intradia_detectan_impulsos_sin_pivotes_locales_clasicos():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
+        for i in range(24)
+    ]).tz_convert("UTC")
+    lows = [
+        100.0, 101.0, 102.0, 103.0, 104.0, 105.0,
+        101.4, 103.0, 104.0, 105.0, 106.0, 107.0,
+        102.8, 104.0, 105.0, 106.0, 107.0, 108.0,
+        104.2, 106.0, 107.0, 108.0, 109.0, 110.0,
+    ]
+    frame = pd.DataFrame({
+        "open":  [price + 0.7 for price in lows],
+        "high":  [price + 1.2 for price in lows],
+        "low":   lows,
+        "close": [price + 0.9 for price in lows],
+        "volume": [100] * len(lows),
+    }, index=idx)
+
+    support_lines = [
+        line for line in _intraday_trendlines_3m(frame, replay_day)
+        if line["kind"] == "soporte"
+    ]
+
+    assert support_lines

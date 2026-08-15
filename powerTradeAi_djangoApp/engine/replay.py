@@ -490,17 +490,17 @@ def _session_micro_trendlines(session: pd.DataFrame) -> list[dict]:
 
 def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
                       kind: str) -> list[dict]:
-    pivots = _swing_points(values, kind)
-    if len(pivots) < 2:
+    anchors = _trendline_anchor_points(values, kind)
+    if len(anchors) < 2:
         return []
     ref = float(np.median(values))
     min_move = max(ref * 0.0015, 0.05)
     tol = _intraday_touch_band(ref)
     out = []
-    for left in range(len(pivots) - 1):
-        for right in range(left + 1, len(pivots)):
-            i, y1 = pivots[left]
-            j, y2 = pivots[right]
+    for left in range(len(anchors) - 1):
+        for right in range(left + 1, len(anchors)):
+            i, y1 = anchors[left]
+            j, y2 = anchors[right]
             span = j - i
             if span < 2:
                 continue
@@ -584,6 +584,12 @@ def _touch_zones_have_spacing(zones: list[list[int]], min_between: int) -> bool:
         if intermediate_bars < min_between:
             return False
     return True
+
+
+def _trendline_anchor_points(values: np.ndarray, kind: str) -> list[tuple[int, float]]:
+    anchors = _swing_points(values, kind)
+    anchors.extend((i, float(value)) for i, value in enumerate(values))
+    return sorted(set(anchors))
 
 
 def _swing_points(values: np.ndarray, kind: str) -> list[tuple[int, float]]:
