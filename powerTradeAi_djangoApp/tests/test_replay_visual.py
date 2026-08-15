@@ -309,3 +309,34 @@ def test_lineas_intradia_se_limitan_a_pocas_por_tipo_en_la_sesion():
 
     assert len([line for line in intraday if line["kind"] == "resistencia"]) <= 2
     assert len([line for line in intraday if line["kind"] == "soporte"]) <= 2
+
+
+def test_lineas_intradia_usan_temporalidad_de_5m():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_5m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=5 * i)
+        for i in range(18)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open":  [100, 101, 103, 105, 107, 109, 108, 106, 104,
+                  102, 100, 99, 100, 101, 102, 103, 104, 105],
+        "high":  [101, 102, 104, 106, 108, 110, 109, 107, 105,
+                  103, 101, 100, 101, 102, 103, 104, 105, 106],
+        "low":   [99, 100, 102, 104, 106, 108, 107, 105, 103,
+                  101, 99, 98, 99, 100, 101, 102, 103, 104],
+        "close": [101, 103, 105, 107, 109, 108, 106, 104, 102,
+                  100, 99, 100, 101, 102, 103, 104, 105, 106],
+        "volume": [100] * 18,
+    }, index=idx)
+
+    lines = _intraday_trendlines_5m(frame, replay_day)
+
+    assert lines
+    assert all(line["timeframe"] == "5m" for line in lines)
+    assert all(line["label"].startswith("5m intradia") for line in lines)

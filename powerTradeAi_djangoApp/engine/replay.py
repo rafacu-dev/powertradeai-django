@@ -141,9 +141,11 @@ def replay_timeline(day: date, symbol: str, provider=None,
     bars = provider.bars_1m(symbol, day)
     timeline = ReplayTimeline(day=day, symbol=symbol)
     display_bars = _display_bars_15m(provider, symbol, day)
+    intraday_bars = _intraday_bars_5m(provider, symbol, day)
     timeline.candles = _candles_payload(display_bars)
     timeline.replay_start_time = _first_replay_candle_time(display_bars, day)
-    timeline.trendlines = _trendlines_payload(provider, symbol, day, display_bars)
+    timeline.trendlines = _trendlines_payload(
+        provider, symbol, day, display_bars, intraday_bars)
     timeline.breakouts = _confirmed_breakouts(display_bars, day, timeline.trendlines)
     if bars.empty:
         return timeline
@@ -207,11 +209,21 @@ def _candles_payload(bars: pd.DataFrame) -> list[dict]:
 def _display_bars_15m(provider, symbol: str, day: date) -> pd.DataFrame:
     start = _previous_trading_days_start(day, count=5)
     bars = provider.bars(symbol, start, day, "1m")
+    return _resample_intraday_bars(bars, "15min")
+
+
+def _intraday_bars_5m(provider, symbol: str, day: date) -> pd.DataFrame:
+    start = _previous_trading_days_start(day, count=5)
+    bars = provider.bars(symbol, start, day, "1m")
+    return _resample_intraday_bars(bars, "5min")
+
+
+def _resample_intraday_bars(bars: pd.DataFrame, rule: str) -> pd.DataFrame:
     rth = _rth_only(bars)
-    if rth.empty:
+    if rth is None or rth.empty:
         return rth
     out = rth.resample(
-        "15min", label="left", closed="left",
+        rule, label="left", closed="left",
         origin="start_day", offset="30min",
     ).agg({
         "open": "first", "high": "max", "low": "min",
@@ -252,7 +264,8 @@ def _first_replay_candle_time(bars: pd.DataFrame, day: date) -> int | None:
 
 
 def _trendlines_payload(provider, symbol: str, day: date,
-                        display_bars: pd.DataFrame) -> list[dict]:
+                        display_bars: pd.DataFrame,
+                        intraday_bars: pd.DataFrame | None = None) -> list[dict]:
     """Lineas multi-temporalidad calculadas con datos cerrados antes del replay."""
     if display_bars is None or display_bars.empty:
         return []
@@ -273,7 +286,9 @@ def _trendlines_payload(provider, symbol: str, day: date,
     for timeframe, bars, lookback in specs:
         frame = bars.tail(lookback) if bars is not None and not bars.empty else bars
         out.extend(_trendlines_for_frame(frame, timeframe, draw_start, draw_end))
-    out.extend(_intraday_trendlines_15m(display_bars, day))
+    if intraday_bars is None or intraday_bars.empty:
+        intraday_bars = display_bars
+    out.extend(_intraday_trendlines_5m(intraday_bars, day))
     return out
 
 
@@ -408,6 +423,7 @@ def _line_payload(line: dict, start_time: int, end_time: int,
 
 def _timeframe_seconds(timeframe: str) -> int:
     return {
+        "5m": 5 * 60,
         "15m": 15 * 60,
         "1h": 60 * 60,
         "1d": 24 * 60 * 60,
@@ -436,7 +452,11 @@ def _horizontal_levels(points: list[tuple[int, float]], closes: np.ndarray) -> l
 
 
 def _intraday_trendlines_15m(bars: pd.DataFrame, replay_day: date) -> list[dict]:
-    """Lineas cortas formadas dentro de cada sesion previa visible."""
+    return _intraday_trendlines_5m(bars, replay_day)
+
+
+def _intraday_trendlines_5m(bars: pd.DataFrame, replay_day: date) -> list[dict]:
+    """Lineas cortas intradia calculadas con swings de 5 minutos."""
     if bars is None or bars.empty:
         return []
     previous = bars[bars.index.tz_convert(NY).date < replay_day]
@@ -499,7 +519,7 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
             end_index = min(len(session) - 1, j + max(2, span))
             end_value = slope * end_index + intercept
             out.append({
-                "timeframe": "15m",
+                "timeframe": "5m",
                 "kind": kind,
                 "direction": "bajista" if kind == "resistencia" else "alcista",
                 "touches": touches,
@@ -514,7 +534,7 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
                         "value": round(float(end_value), 4),
                     },
                 ],
-                "label": f"15m intradia {kind}",
+                "label": f"5m intradia {kind}",
                 "scope": "intradia",
                 "session_date": str(session.index[-1].tz_convert(NY).date()),
                 "start_index": i,
