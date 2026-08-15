@@ -452,29 +452,34 @@ def _session_micro_trendlines(session: pd.DataFrame) -> list[dict]:
     if len(session) < 5:
         return []
     lines: list[dict] = []
-    max_window = min(10, len(session))
-    for end in range(4, len(session)):
+    max_window = min(14, len(session))
+    for end in range(5, len(session)):
         start = max(0, end - max_window + 1)
         window = session.iloc[start:end + 1]
-        lines.extend(_micro_lines_for_window(window, start))
-    return _dedupe_micro_lines(lines)
+        lines.extend(_micro_lines_for_window(window, session, start))
+    return _select_session_micro_lines(lines)
 
 
-def _micro_lines_for_window(window: pd.DataFrame, offset: int) -> list[dict]:
+def _micro_lines_for_window(window: pd.DataFrame, session: pd.DataFrame,
+                            offset: int) -> list[dict]:
     highs = window["high"].astype(float).to_numpy()
     lows = window["low"].astype(float).to_numpy()
     candidates: list[dict] = []
-    candidates.extend(_fit_micro_line(window, highs, offset, "resistencia"))
-    candidates.extend(_fit_micro_line(window, lows, offset, "soporte"))
+    candidates.extend(_fit_micro_line(window, session, highs, offset, "resistencia"))
+    candidates.extend(_fit_micro_line(window, session, lows, offset, "soporte"))
     return candidates
 
 
-def _fit_micro_line(window: pd.DataFrame, values: np.ndarray, offset: int,
-                    kind: str) -> list[dict]:
+def _fit_micro_line(window: pd.DataFrame, session: pd.DataFrame,
+                    values: np.ndarray, offset: int, kind: str) -> list[dict]:
     out = []
     n = len(values)
+    session_end = len(session) - 1
     for i in range(0, n - 2):
         for j in range(i + 2, n):
+            span = j - i
+            if span < 4:
+                continue
             slope = (values[j] - values[i]) / (j - i)
             if kind == "resistencia" and slope >= 0:
                 continue
@@ -484,23 +489,30 @@ def _fit_micro_line(window: pd.DataFrame, values: np.ndarray, offset: int,
             projected = np.array([slope * x + intercept for x in range(n)])
             ref = float(np.median(values))
             tol = max(ref * 0.0025, 0.01)
-            touches = int(np.count_nonzero(np.abs(values - projected) <= tol))
+            touch_idx = np.flatnonzero(np.abs(values - projected) <= tol)
+            touches = int(len(touch_idx))
             if touches < 3:
                 continue
+            first_touch = int(touch_idx[0])
+            last_touch = int(touch_idx[-1])
+            if last_touch - first_touch < 4:
+                continue
+            session_x2 = session_end - offset
+            line_end = slope * session_x2 + intercept
             out.append({
                 "timeframe": "15m",
                 "kind": kind,
                 "direction": "bajista" if kind == "resistencia" else "alcista",
                 "touches": touches,
-                "score": touches * 10 + (j - i),
+                "score": touches * 100 + span * 10 + (n - j),
                 "points": [
                     {
                         "time": int(window.index[i].timestamp()),
                         "value": round(float(projected[i]), 4),
                     },
                     {
-                        "time": int(window.index[-1].timestamp()),
-                        "value": round(float(projected[-1]), 4),
+                        "time": int(session.index[-1].timestamp()),
+                        "value": round(float(line_end), 4),
                     },
                 ],
                 "label": f"15m intradia {kind}",
@@ -511,22 +523,22 @@ def _fit_micro_line(window: pd.DataFrame, values: np.ndarray, offset: int,
     return out
 
 
-def _dedupe_micro_lines(lines: list[dict]) -> list[dict]:
-    best: dict[tuple, dict] = {}
+def _select_session_micro_lines(lines: list[dict]) -> list[dict]:
+    """Deja solo las lineas intradia principales de la sesion."""
+    best: dict[str, dict] = {}
     for line in lines:
-        p1, p2 = line["points"]
-        key = (
-            line["kind"],
-            p1["time"] // 900,
-            p2["time"] // 900,
-            round(float(p1["value"]), 1),
-            round(float(p2["value"]), 1),
-        )
+        key = line["kind"]
         current = best.get(key)
-        if current is None or line["score"] > current["score"]:
+        if current is None or _micro_rank(line) > _micro_rank(current):
             best[key] = line
-    ranked = sorted(best.values(), key=lambda item: item["score"], reverse=True)
-    return ranked[:8]
+    return sorted(best.values(), key=lambda item: item["kind"])
+
+
+def _micro_rank(line: dict) -> tuple:
+    p1, p2 = line["points"]
+    duration = int(p2["time"]) - int(p1["time"])
+    move = abs(float(p2["value"]) - float(p1["value"]))
+    return (int(line.get("touches", 0)), duration, move, int(line.get("score", 0)))
 
 
 def _confirmed_breakouts(bars: pd.DataFrame, day: date,
