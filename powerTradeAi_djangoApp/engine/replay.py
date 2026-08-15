@@ -446,7 +446,7 @@ def _confirmed_breakouts(bars: pd.DataFrame, day: date,
 
     out = []
     for line in trendlines:
-        if line.get("kind") not in {"resistencia", "soporte"}:
+        if line.get("kind") not in {"resistencia", "soporte", "corte"}:
             continue
         points = line.get("points") or []
         if len(points) < 2:
@@ -464,24 +464,31 @@ def _confirmed_breakouts(bars: pd.DataFrame, day: date,
             if None in (prev_level, current_level, confirm_level):
                 continue
 
-            if (
-                line["kind"] == "resistencia"
+            broke_up = (
+                line["kind"] in {"resistencia", "corte"}
                 and float(prev["close"]) <= prev_level
                 and float(current["close"]) > current_level
-                and float(confirm["close"]) > confirm_level
-                and float(confirm["close"]) > float(current["close"])
-            ):
+            )
+            confirms_up = (
+                float(confirm["close"]) > confirm_level
+                and float(confirm["close"]) > float(confirm["open"])
+            )
+            if broke_up and confirms_up:
                 out.append(_breakout_payload(
                     line, confirm_ts, "CALL", float(confirm["close"]),
                     confirm_level))
                 break
-            if (
-                line["kind"] == "soporte"
+
+            broke_down = (
+                line["kind"] in {"soporte", "corte"}
                 and float(prev["close"]) >= prev_level
                 and float(current["close"]) < current_level
-                and float(confirm["close"]) < confirm_level
-                and float(confirm["close"]) < float(current["close"])
-            ):
+            )
+            confirms_down = (
+                float(confirm["close"]) < confirm_level
+                and float(confirm["close"]) < float(confirm["open"])
+            )
+            if broke_down and confirms_down:
                 out.append(_breakout_payload(
                     line, confirm_ts, "PUT", float(confirm["close"]),
                     confirm_level))

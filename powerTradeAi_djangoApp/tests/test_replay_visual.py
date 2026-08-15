@@ -149,10 +149,10 @@ def test_breakout_confirmado_marca_la_vela_siguiente():
         for i in range(4)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
-        "open": [99, 100, 102, 104],
+        "open": [99, 100, 102, 103],
         "high": [100, 103, 105, 106],
         "low": [98, 99, 101, 103],
-        "close": [99, 102, 104, 105],
+        "close": [99, 102, 103.5, 105],
         "volume": [100] * 4,
     }, index=idx)
     line = {
@@ -168,9 +168,43 @@ def test_breakout_confirmado_marca_la_vela_siguiente():
     assert out == [{
         "time": int(idx[2].timestamp()),
         "direction": "CALL",
-        "price": 104.0,
+        "price": 103.5,
         "line_price": 100.0,
         "timeframe": "15m",
         "kind": "resistencia",
         "label": "Confirmacion CALL 15m resistencia",
     }]
+
+
+def test_breakout_confirmado_incluye_corte_lateral():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _confirmed_breakouts
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 10, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(4)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open": [102, 101, 99, 98],
+        "high": [103, 102, 100, 99],
+        "low": [101, 98, 96, 95],
+        "close": [102, 99, 97, 96],
+        "volume": [100] * 4,
+    }, index=idx)
+    line = {
+        "timeframe": "15m", "kind": "corte",
+        "points": [
+            {"time": int(idx[0].timestamp()), "value": 100},
+            {"time": int(idx[-1].timestamp()), "value": 100},
+        ],
+    }
+
+    out = _confirmed_breakouts(frame, day, [line])
+
+    assert out[0]["direction"] == "PUT"
+    assert out[0]["time"] == int(idx[2].timestamp())
+    assert out[0]["kind"] == "corte"
