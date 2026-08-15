@@ -81,6 +81,22 @@ button:disabled { opacity: .55; cursor: default; }
   border-radius: 8px; overflow: hidden; min-height: 610px; position: relative;
 }
 #chart { height: 560px; width: 100%; }
+.breakout-overlays {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 560px;
+  pointer-events: none;
+  z-index: 4;
+}
+.breakout-circle {
+  position: absolute;
+  border: 1.5px solid rgba(37, 99, 235, .95);
+  background: rgba(96, 165, 250, .16);
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
 .loading {
   position: absolute; inset: 0 0 50px 0; display: none;
   align-items: center; justify-content: center; background: var(--surface);
@@ -197,6 +213,7 @@ button:disabled { opacity: .55; cursor: default; }
     <div class="chart-wrap">
       <div class="loading" id="loading">Cargando datos históricos...</div>
       <div id="chart"></div>
+      <div class="breakout-overlays" id="breakout-overlays"></div>
       <div class="transport">
         <button id="step-btn" class="secondary" disabled>Avanzar</button>
         <input type="range" id="scrubber" min="0" max="0" value="0" disabled>
@@ -250,7 +267,13 @@ function ensureChart() {
     borderUpColor: '#0ca678', borderDownColor: '#e03131',
     wickUpColor: '#0ca678', wickDownColor: '#e03131',
   });
-  new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth, height: el.clientHeight })).observe(el);
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => drawBreakoutCircles());
+  new ResizeObserver(() => {
+    chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    const overlay = document.getElementById('breakout-overlays');
+    if (overlay) overlay.style.height = `${el.clientHeight}px`;
+    drawBreakoutCircles();
+  }).observe(el);
 }
 function trendlineStyle(line) {
   if (line.scope === 'intradia') return { color: '#2563eb', width: 3, style: LightweightCharts.LineStyle.Solid };
@@ -397,20 +420,49 @@ function draw() {
       shape: e.direction === 'PUT' ? 'arrowDown' : 'arrowUp',
       text: e.strategy_id,
     }));
-  markers.push(...allBreakouts
-    .filter(b => b.time <= currentTime)
-    .map(b => ({
-      time: b.time,
-      position: 'inBar',
-      color: '#1c7ed6',
-      shape: 'circle',
-      text: '',
-    })));
   candles.setMarkers(markers);
+  drawBreakoutCircles(currentTime, visible);
   document.getElementById('scrubber').value = cursor;
   document.getElementById('clock').textContent = fmtTime(currentTime);
   activateEvents(currentTime);
   if (cursor === allCandles.length - 1) stop();
+}
+function drawBreakoutCircles(currentTime = null, visible = null) {
+  const overlay = document.getElementById('breakout-overlays');
+  if (!overlay || !chart || !candles) return;
+  overlay.replaceChildren();
+  const shown = visible || allCandles.slice(0, cursor + 1);
+  const lastTime = currentTime || (shown.length ? shown[shown.length - 1].time : null);
+  if (!lastTime || !shown.length) return;
+  const byTime = new Map(shown.map(c => [c.time, c]));
+  allBreakouts
+    .filter(b => b.time <= lastTime)
+    .forEach(b => {
+      const candle = byTime.get(b.time);
+      if (!candle) return;
+      const x = chart.timeScale().timeToCoordinate(b.time);
+      const yHigh = candles.priceToCoordinate(candle.high);
+      const yLow = candles.priceToCoordinate(candle.low);
+      if (x == null || yHigh == null || yLow == null) return;
+      const spacing = candleSpacingAtTime(b.time, shown);
+      const size = Math.max(30, Math.abs(yLow - yHigh) + 18, spacing * 1.6);
+      const circle = document.createElement('span');
+      circle.className = 'breakout-circle';
+      circle.style.left = `${x}px`;
+      circle.style.top = `${(yHigh + yLow) / 2}px`;
+      circle.style.width = `${size}px`;
+      circle.style.height = `${size}px`;
+      overlay.appendChild(circle);
+    });
+}
+function candleSpacingAtTime(time, candlesForView) {
+  const idx = candlesForView.findIndex(c => c.time === time);
+  if (idx < 0) return 18;
+  const prev = idx > 0 ? chart.timeScale().timeToCoordinate(candlesForView[idx - 1].time) : null;
+  const next = idx < candlesForView.length - 1 ? chart.timeScale().timeToCoordinate(candlesForView[idx + 1].time) : null;
+  const x = chart.timeScale().timeToCoordinate(time);
+  const gaps = [prev, next].filter(v => v != null && x != null).map(v => Math.abs(v - x));
+  return gaps.length ? Math.max(...gaps) : 18;
 }
 function findReplayStartIndex(startTime) {
   if (!allCandles.length) return 0;
