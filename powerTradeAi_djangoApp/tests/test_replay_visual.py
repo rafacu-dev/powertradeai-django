@@ -420,3 +420,33 @@ def test_lineas_intradia_exigen_dos_velas_intermedias_entre_toques():
     }, index=idx)
 
     assert _intraday_trendlines_3m(frame, replay_day) == []
+
+
+def test_lineas_intradia_aceptan_toques_dentro_del_grosor_de_banda():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _intraday_trendlines_3m
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    replay_day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=3 * i)
+        for i in range(21)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open":  [780 + i * 0.2 for i in range(21)],
+        "high":  [781 + i * 0.2 for i in range(21)],
+        "low":   [780.0, 782.0, 783.0, 784.0, 785.0, 786.0, 787.0,
+                  788.0, 781.1, 783.0, 784.0, 785.0, 786.0, 787.0,
+                  788.0, 789.0, 782.2, 784.0, 785.0, 786.0, 787.0],
+        "close": [780.5 + i * 0.2 for i in range(21)],
+        "volume": [100] * 21,
+    }, index=idx)
+
+    support_lines = [
+        line for line in _intraday_trendlines_3m(frame, replay_day)
+        if line["kind"] == "soporte"
+    ]
+
+    assert support_lines

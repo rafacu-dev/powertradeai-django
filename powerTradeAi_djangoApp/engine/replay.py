@@ -37,6 +37,7 @@ RTH_FIRST_DECISION = "09:31"   # antes no hay ninguna vela cerrada
 INTRADAY_TRENDLINE_MINUTES = 3
 INTRADAY_TRENDLINE_MIN_DURATION = 45 * 60
 INTRADAY_TRENDLINE_MIN_BARS_BETWEEN_TOUCHES = 2
+INTRADAY_TRENDLINE_TOUCH_BAND_BPS = 18
 
 
 @dataclass
@@ -494,7 +495,7 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
         return []
     ref = float(np.median(values))
     min_move = max(ref * 0.0015, 0.05)
-    tol = max(ref * 0.0012, 0.03)
+    tol = _intraday_touch_band(ref)
     out = []
     for left in range(len(pivots) - 1):
         for right in range(left + 1, len(pivots)):
@@ -561,6 +562,10 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
                 "end_index": end_index,
             })
     return out
+
+
+def _intraday_touch_band(reference_price: float) -> float:
+    return max(reference_price * (INTRADAY_TRENDLINE_TOUCH_BAND_BPS / 10000), 0.05)
 
 
 def _touch_zones(touch_idx: np.ndarray) -> list[list[int]]:
