@@ -307,8 +307,8 @@ def test_lineas_intradia_se_limitan_a_pocas_por_tipo_en_la_sesion():
     lines = _intraday_trendlines_15m(frame, replay_day)
     intraday = [line for line in lines if line.get("scope") == "intradia"]
 
-    assert len([line for line in intraday if line["kind"] == "resistencia"]) <= 2
-    assert len([line for line in intraday if line["kind"] == "soporte"]) <= 2
+    assert len([line for line in intraday if line["kind"] == "resistencia"]) <= 4
+    assert len([line for line in intraday if line["kind"] == "soporte"]) <= 4
 
 
 def test_lineas_intradia_usan_temporalidad_de_15m_y_tolerancia():

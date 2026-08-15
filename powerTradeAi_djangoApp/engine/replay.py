@@ -461,16 +461,21 @@ def _intraday_trendlines_15m(bars: pd.DataFrame, replay_day: date) -> list[dict]
 def _session_micro_trendlines(session: pd.DataFrame) -> list[dict]:
     if len(session) < 5:
         return []
-    highs = session["high"].astype(float).to_numpy()
-    lows = session["low"].astype(float).to_numpy()
     candidates = []
-    candidates.extend(_swing_trendlines(session, highs, "resistencia"))
-    candidates.extend(_swing_trendlines(session, lows, "soporte"))
+    candidates.extend(_swing_trendlines(session, "resistencia"))
+    candidates.extend(_swing_trendlines(session, "soporte"))
+    max_window = min(16, len(session))
+    min_window = max(4, int(np.ceil(INTRADAY_TRENDLINE_MIN_DURATION / (15 * 60))) + 1)
+    for start in range(0, len(session) - min_window + 1):
+        for end in range(start + min_window, min(len(session), start + max_window) + 1):
+            window = session.iloc[start:end]
+            candidates.extend(_swing_trendlines(window, "resistencia", offset=start))
+            candidates.extend(_swing_trendlines(window, "soporte", offset=start))
     return _select_swing_lines(candidates)
 
 
-def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
-                      kind: str) -> list[dict]:
+def _swing_trendlines(session: pd.DataFrame, kind: str, offset: int = 0) -> list[dict]:
+    values = session["high" if kind == "resistencia" else "low"].astype(float).to_numpy()
     anchors = _trendline_anchor_points(values, kind)
     if len(anchors) < 2:
         return []
@@ -515,8 +520,8 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
             )
             if touch_duration < INTRADAY_TRENDLINE_MIN_DURATION:
                 continue
-            end_index = min(len(session) - 1, j + max(2, span))
-            end_value = slope * end_index + intercept
+            local_end_index = min(len(session) - 1, j + max(1, span // 2))
+            end_value = slope * local_end_index + intercept
             out.append({
                 "timeframe": "15m",
                 "kind": kind,
@@ -529,15 +534,15 @@ def _swing_trendlines(session: pd.DataFrame, values: np.ndarray,
                         "value": round(float(y1), 4),
                     },
                     {
-                        "time": int(session.index[end_index].timestamp()),
+                        "time": int(session.index[local_end_index].timestamp()),
                         "value": round(float(end_value), 4),
                     },
                 ],
                 "label": f"15m intradia {kind}",
                 "scope": "intradia",
                 "session_date": str(session.index[-1].tz_convert(NY).date()),
-                "start_index": i,
-                "end_index": end_index,
+                "start_index": offset + i,
+                "end_index": offset + local_end_index,
             })
     return out
 
@@ -584,7 +589,7 @@ def _select_swing_lines(lines: list[dict]) -> list[dict]:
     selected: list[dict] = []
     ranked = sorted(lines, key=_swing_rank, reverse=True)
     for line in ranked:
-        if sum(1 for item in selected if item["kind"] == line["kind"]) >= 2:
+        if sum(1 for item in selected if item["kind"] == line["kind"]) >= 4:
             continue
         if any(_line_overlaps(line, item) for item in selected):
             continue
