@@ -145,7 +145,7 @@ def test_breakout_confirmado_marca_la_vela_siguiente():
 
     day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
-        datetime(2026, 8, 10, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
         for i in range(4)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
@@ -185,7 +185,7 @@ def test_breakout_confirmado_incluye_corte_lateral():
 
     day = date(2026, 8, 10)
     idx = pd.DatetimeIndex([
-        datetime(2026, 8, 10, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        datetime(2026, 8, 7, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
         for i in range(4)
     ]).tz_convert("UTC")
     frame = pd.DataFrame({
@@ -208,3 +208,33 @@ def test_breakout_confirmado_incluye_corte_lateral():
     assert out[0]["direction"] == "PUT"
     assert out[0]["time"] == int(idx[2].timestamp())
     assert out[0]["kind"] == "corte"
+
+
+def test_breakout_no_marca_el_dia_del_replay():
+    import pandas as pd
+    from datetime import date, datetime, timedelta
+
+    from powerTradeAi_djangoApp.engine.replay import _confirmed_breakouts
+    from powerTradeAi_djangoApp.engine.session import NY
+
+    day = date(2026, 8, 10)
+    idx = pd.DatetimeIndex([
+        datetime(2026, 8, 10, 9, 30, tzinfo=NY) + timedelta(minutes=15 * i)
+        for i in range(4)
+    ]).tz_convert("UTC")
+    frame = pd.DataFrame({
+        "open": [99, 100, 102, 103],
+        "high": [100, 103, 105, 106],
+        "low": [98, 99, 101, 103],
+        "close": [99, 102, 103.5, 105],
+        "volume": [100] * 4,
+    }, index=idx)
+    line = {
+        "timeframe": "15m", "kind": "resistencia",
+        "points": [
+            {"time": int(idx[0].timestamp()), "value": 100},
+            {"time": int(idx[-1].timestamp()), "value": 100},
+        ],
+    }
+
+    assert _confirmed_breakouts(frame, day, [line]) == []

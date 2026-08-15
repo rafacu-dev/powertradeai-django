@@ -436,12 +436,12 @@ def _horizontal_levels(points: list[tuple[int, float]], closes: np.ndarray) -> l
 
 def _confirmed_breakouts(bars: pd.DataFrame, day: date,
                          trendlines: list[dict]) -> list[dict]:
-    """Circulos para ruptura de linea + vela siguiente de continuidad."""
+    """Circulos en los dias previos: ruptura de linea + vela de continuidad."""
     if bars is None or bars.empty or len(bars) < 3:
         return []
     local = bars.index.tz_convert(NY)
-    session = bars[local.date == day]
-    if len(session) < 3:
+    previous = bars[local.date < day]
+    if len(previous) < 3:
         return []
 
     out = []
@@ -451,49 +451,59 @@ def _confirmed_breakouts(bars: pd.DataFrame, day: date,
         points = line.get("points") or []
         if len(points) < 2:
             continue
-        for i in range(1, len(session) - 1):
-            prev = session.iloc[i - 1]
-            current = session.iloc[i]
-            confirm = session.iloc[i + 1]
-            current_ts = int(session.index[i].timestamp())
-            confirm_ts = int(session.index[i + 1].timestamp())
-            prev_ts = int(session.index[i - 1].timestamp())
-            prev_level = _line_value_at(points, prev_ts)
-            current_level = _line_value_at(points, current_ts)
-            confirm_level = _line_value_at(points, confirm_ts)
-            if None in (prev_level, current_level, confirm_level):
+        for _, session in previous.groupby(previous.index.tz_convert(NY).date):
+            if len(session) < 3:
                 continue
-
-            broke_up = (
-                line["kind"] in {"resistencia", "corte"}
-                and float(prev["close"]) <= prev_level
-                and float(current["close"]) > current_level
-            )
-            confirms_up = (
-                float(confirm["close"]) > confirm_level
-                and float(confirm["close"]) > float(confirm["open"])
-            )
-            if broke_up and confirms_up:
-                out.append(_breakout_payload(
-                    line, confirm_ts, "CALL", float(confirm["close"]),
-                    confirm_level))
-                break
-
-            broke_down = (
-                line["kind"] in {"soporte", "corte"}
-                and float(prev["close"]) >= prev_level
-                and float(current["close"]) < current_level
-            )
-            confirms_down = (
-                float(confirm["close"]) < confirm_level
-                and float(confirm["close"]) < float(confirm["open"])
-            )
-            if broke_down and confirms_down:
-                out.append(_breakout_payload(
-                    line, confirm_ts, "PUT", float(confirm["close"]),
-                    confirm_level))
+            found = _first_confirmed_breakout_in_session(session, line, points)
+            if found is not None:
+                out.append(found)
                 break
     return out
+
+
+def _first_confirmed_breakout_in_session(session: pd.DataFrame, line: dict,
+                                         points: list[dict]) -> dict | None:
+    for i in range(1, len(session) - 1):
+        prev = session.iloc[i - 1]
+        current = session.iloc[i]
+        confirm = session.iloc[i + 1]
+        current_ts = int(session.index[i].timestamp())
+        confirm_ts = int(session.index[i + 1].timestamp())
+        prev_ts = int(session.index[i - 1].timestamp())
+        prev_level = _line_value_at(points, prev_ts)
+        current_level = _line_value_at(points, current_ts)
+        confirm_level = _line_value_at(points, confirm_ts)
+        if None in (prev_level, current_level, confirm_level):
+            continue
+
+        broke_up = (
+            line["kind"] in {"resistencia", "corte"}
+            and float(prev["close"]) <= prev_level
+            and float(current["close"]) > current_level
+        )
+        confirms_up = (
+            float(confirm["close"]) > confirm_level
+            and float(confirm["close"]) > float(confirm["open"])
+        )
+        if broke_up and confirms_up:
+            return _breakout_payload(
+                line, confirm_ts, "CALL", float(confirm["close"]),
+                confirm_level)
+
+        broke_down = (
+            line["kind"] in {"soporte", "corte"}
+            and float(prev["close"]) >= prev_level
+            and float(current["close"]) < current_level
+        )
+        confirms_down = (
+            float(confirm["close"]) < confirm_level
+            and float(confirm["close"]) < float(confirm["open"])
+        )
+        if broke_down and confirms_down:
+            return _breakout_payload(
+                line, confirm_ts, "PUT", float(confirm["close"]),
+                confirm_level)
+    return None
 
 
 def _line_value_at(points: list[dict], ts: int) -> float | None:
