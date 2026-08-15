@@ -129,6 +129,53 @@ def replay_action(request):
     })
 
 
+@staff_member_required
+@require_GET
+def replay_view(request):
+    strategies = Strategy.objects.filter(enabled=True).order_by("symbol", "strategy_id")
+    symbols = sorted(set(strategies.values_list("symbol", flat=True)))
+    return render(request, "powertradeai/replay.html", {
+        "symbols": symbols,
+        "strategies": strategies,
+    })
+
+
+@staff_member_required
+@require_GET
+def replay_data(request):
+    symbol = (request.GET.get("symbol") or "SPY").upper()
+    date_str = request.GET.get("date", "")
+    if not date_str:
+        return JsonResponse({"error": "Fecha requerida"}, status=400)
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return JsonResponse({"error": "Formato invalido (YYYY-MM-DD)"}, status=400)
+
+    strategy = request.GET.get("strategy", "").strip()
+    strategy_ids = [strategy] if strategy else None
+
+    from .engine.replay import replay_timeline
+    from .engine.session import is_trading_day
+
+    if not is_trading_day(day):
+        return JsonResponse({"error": f"{day} no es dia habil"}, status=400)
+    try:
+        timeline = replay_timeline(day, symbol, strategy_ids=strategy_ids)
+    except Exception as exc:
+        log.exception("timeline replay fallo")
+        return JsonResponse({"error": str(exc)}, status=500)
+
+    return JsonResponse({
+        "date": str(timeline.day),
+        "symbol": timeline.symbol,
+        "candles": timeline.candles,
+        "events": timeline.events,
+        "strategies": timeline.strategies,
+        "errors": [{"strategy_id": s, "detail": d} for s, d in timeline.errors],
+    })
+
+
 # ── Agente ──────────────────────────────────────────────────────────
 
 @staff_member_required

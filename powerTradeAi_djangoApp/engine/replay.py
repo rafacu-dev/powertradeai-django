@@ -51,6 +51,16 @@ class ReplayResult:
         return sum((a.net_dollars for a in self.closed), Decimal("0.00"))
 
 
+@dataclass
+class ReplayTimeline:
+    day: date
+    symbol: str
+    candles: list[dict] = field(default_factory=list)
+    events: list[dict] = field(default_factory=list)
+    strategies: list[str] = field(default_factory=list)
+    errors: list[tuple[str, str]] = field(default_factory=list)
+
+
 class _SessionProvider:
     """Envuelve al proveedor real y sirve el dia entero desde memoria.
 
@@ -113,6 +123,135 @@ def _minutes(day: date):
     while cursor <= end:
         yield cursor
         cursor += timedelta(minutes=1)
+
+
+def replay_timeline(day: date, symbol: str, provider=None,
+                    strategy_ids: list[str] | None = None) -> ReplayTimeline:
+    """Datos para el reproductor visual. No escribe en base de datos."""
+    if not is_trading_day(day):
+        raise ValueError(f"{day} no es un dia habil de mercado")
+
+    symbol = symbol.upper()
+    provider = _SessionProvider(provider or get_provider(), day)
+    bars = provider.bars_1m(symbol, day)
+    timeline = ReplayTimeline(day=day, symbol=symbol)
+    timeline.candles = _candles_payload(bars)
+    if bars.empty:
+        return timeline
+
+    rows = Strategy.objects.filter(enabled=True, symbol=symbol)
+    if strategy_ids:
+        rows = rows.filter(strategy_id__in=strategy_ids)
+
+    for row in rows:
+        timeline.strategies.append(row.strategy_id)
+        try:
+            strategy = get_strategy_class(row.strategy_id)(row.params)
+            history_cache: dict = {}
+            fired = False
+            last_note_minute = None
+            for moment in _minutes(day):
+                ctx = ScanContext(
+                    provider=provider, symbol=row.symbol, session_date=day,
+                    now=moment, bars=bars, _history_cache=history_cache)
+                signal = strategy.evaluate(ctx)
+                if signal is None:
+                    note = _observation_event(row.strategy_id, ctx, last_note_minute)
+                    if note is not None:
+                        last_note_minute = moment.minute
+                        timeline.events.append(note)
+                    continue
+
+                timeline.events.append(_signal_event(row.strategy_id, signal))
+                fired = True
+                break
+            if not fired:
+                timeline.events.append({
+                    "time": int(datetime.combine(
+                        day, session_close(day), tzinfo=NY).timestamp()),
+                    "type": "no_signal",
+                    "strategy_id": row.strategy_id,
+                    "label": "Sin senal",
+                    "detail": "La regla no disparo con los datos disponibles.",
+                })
+        except Exception as exc:
+            log.exception("timeline de %s fallo", row.strategy_id)
+            timeline.errors.append((row.strategy_id, f"{type(exc).__name__}: {exc}"))
+
+    timeline.events.sort(key=lambda item: (item["time"], item["strategy_id"]))
+    return timeline
+
+
+def _candles_payload(bars: pd.DataFrame) -> list[dict]:
+    rows = []
+    for ts, row in bars.iterrows():
+        rows.append({
+            "time": int(ts.timestamp()),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+        })
+    return rows
+
+
+def _observation_event(strategy_id: str, ctx: ScanContext,
+                       last_note_minute: int | None) -> dict | None:
+    # Marcadores ligeros cada 15 minutos para que el replay muestre avance aun
+    # cuando ninguna regla dispara. Las senales conservan todo el detalle.
+    if ctx.now.minute % 15 != 0 or ctx.now.minute == last_note_minute:
+        return None
+    closed = ctx.causal_bars(1)
+    if closed.empty:
+        return None
+    last = closed.iloc[-1]
+    return {
+        "time": int(ctx.now.timestamp()),
+        "type": "observation",
+        "strategy_id": strategy_id,
+        "label": "Evaluacion",
+        "price": round(float(last["close"]), 4),
+        "detail": "Regla evaluada sin senal.",
+    }
+
+
+def _signal_event(strategy_id: str, signal) -> dict:
+    levels = {}
+    for key in (
+        "range_high", "range_low", "bb_mid", "bb_upper", "bb_lower",
+        "target_underlying", "stop_underlying", "open_930", "prev_rth_close",
+    ):
+        value = signal.meta.get(key)
+        if value is not None:
+            levels[key] = value
+    return {
+        "time": int(pd.Timestamp(signal.signal_ts).timestamp()),
+        "type": "signal",
+        "strategy_id": strategy_id,
+        "direction": signal.direction,
+        "label": f"Senal {signal.direction}",
+        "price": round(float(signal.underlying), 4),
+        "detail": _signal_detail(signal.meta),
+        "meta": signal.meta,
+        "levels": levels,
+    }
+
+
+def _signal_detail(meta: dict) -> str:
+    parts = []
+    if meta.get("rama"):
+        parts.append(f"rama {meta['rama']}")
+    if meta.get("gap_bps") is not None:
+        parts.append(f"gap {meta['gap_bps']} bps")
+    if meta.get("volume_ratio") is not None:
+        parts.append(f"vol x{meta['volume_ratio']}")
+    if meta.get("range_high") is not None and meta.get("range_low") is not None:
+        parts.append(f"rango {meta['range_low']} - {meta['range_high']}")
+    if meta.get("target_underlying") is not None:
+        parts.append(f"target {meta['target_underlying']}")
+    if meta.get("stop_underlying") is not None:
+        parts.append(f"stop {meta['stop_underlying']}")
+    return " · ".join(parts) or "Condiciones matematicas cumplidas."
 
 
 def replay_day(day: date, provider=None, strategy_ids: list[str] | None = None,
