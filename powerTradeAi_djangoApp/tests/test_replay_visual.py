@@ -15,6 +15,8 @@ def test_replay_visual_resuelve_endpoints_en_template():
         "strategies": [],
     })
     assert "/panel/replay/data/" in html
+    assert "trendline-list" in html
+    assert "Toques" in html
     assert "{{" not in html and "{%" not in html
 
 

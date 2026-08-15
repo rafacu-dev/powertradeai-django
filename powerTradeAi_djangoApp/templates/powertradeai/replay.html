@@ -100,6 +100,31 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .legend i { width: 18px; height: 3px; display: inline-block; border-radius: 2px; }
+.trendline-list {
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 10px 12px 12px;
+}
+.trendline-list strong {
+  display: block; font-size: 12px; margin-bottom: 8px; color: var(--text-2);
+}
+.trendline-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.trendline-table th, .trendline-table td {
+  padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left;
+  white-space: nowrap;
+}
+.trendline-table th {
+  color: var(--text-3); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .4px; font-weight: 700;
+}
+.trendline-table td.price, .trendline-table td.touches { text-align: right; }
+.line-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.line-chip i { width: 16px; height: 3px; display: inline-block; border-radius: 2px; }
 .side {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; min-height: 610px; display: flex; flex-direction: column;
@@ -178,6 +203,10 @@ button:disabled { opacity: .55; cursor: default; }
         <div class="clock" id="clock">--:--</div>
       </div>
       <div class="legend" id="line-legend"></div>
+      <div class="trendline-list">
+        <strong>Líneas detectadas</strong>
+        <div id="trendline-list"><div class="empty">Carga una sesión para ver precios y toques.</div></div>
+      </div>
     </div>
     <aside class="side">
       <div class="side-head">
@@ -226,7 +255,7 @@ function ensureChart() {
 function trendlineStyle(line) {
   if (line.kind === 'soporte') return { color: '#0ca678', width: 2, style: LightweightCharts.LineStyle.Solid };
   if (line.kind === 'resistencia') return { color: '#e03131', width: 2, style: LightweightCharts.LineStyle.Solid };
-  return { color: '#e67700', width: 1, style: LightweightCharts.LineStyle.Dashed };
+  return { color: '#e67700', width: 2, style: LightweightCharts.LineStyle.Solid };
 }
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -275,6 +304,7 @@ async function loadReplay() {
     document.getElementById('step-btn').disabled = allCandles.length === 0;
     renderEvents();
     drawTrendlines();
+    renderTrendlineList();
     draw();
     status.textContent = `${data.date} · ${data.symbol} · ${data.timeframe || '15m'} · ${allCandles.length} velas RTH · ${allEvents.length} eventos`;
     const signals = allEvents.filter(e => e.type === 'signal').length;
@@ -312,11 +342,43 @@ function drawTrendlines() {
       const item = document.createElement('span');
       const swatch = document.createElement('i');
       swatch.style.background = style.color;
-      if (line.kind === 'corte') swatch.style.opacity = '0.8';
       item.append(swatch, document.createTextNode(label));
       legend.appendChild(item);
     }
   });
+}
+function lineCurrentPrice(line) {
+  if (!line.points || !line.points.length) return null;
+  const p = line.points[line.points.length - 1].value;
+  return Number.isFinite(Number(p)) ? Number(p) : null;
+}
+function renderTrendlineList() {
+  const box = document.getElementById('trendline-list');
+  box.replaceChildren();
+  if (!allTrendlines.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Sin líneas detectadas.';
+    box.appendChild(empty);
+    return;
+  }
+  const table = document.createElement('table');
+  table.className = 'trendline-table';
+  table.innerHTML = '<thead><tr><th>Línea</th><th>Dirección</th><th class="touches">Toques</th><th class="price">Precio</th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  allTrendlines.forEach(line => {
+    const style = trendlineStyle(line);
+    const price = lineCurrentPrice(line);
+    const row = document.createElement('tr');
+    row.innerHTML =
+      `<td><span class="line-chip"><i style="background:${style.color}"></i>${escapeHtml(line.timeframe)} ${escapeHtml(line.kind)}</span></td>` +
+      `<td>${escapeHtml(line.direction || '')}</td>` +
+      `<td class="touches">${escapeHtml(line.touches ?? '')}</td>` +
+      `<td class="price">${price == null ? '—' : price.toFixed(2)}</td>`;
+    tbody.appendChild(row);
+  });
+  table.appendChild(tbody);
+  box.appendChild(table);
 }
 function draw() {
   if (!candles) return;
