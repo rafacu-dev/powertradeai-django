@@ -219,7 +219,7 @@ def test_breakout_confirmado_incluye_corte_lateral():
     assert out[0]["kind"] == "corte"
 
 
-def test_breakout_no_marca_el_dia_del_replay():
+def test_breakout_marca_el_dia_del_replay_para_playback():
     import pandas as pd
     from datetime import date, datetime, timedelta
 
@@ -246,7 +246,11 @@ def test_breakout_no_marca_el_dia_del_replay():
         ],
     }
 
-    assert _confirmed_breakouts(frame, day, [line]) == []
+    out = _confirmed_breakouts(frame, day, [line])
+
+    assert out
+    assert out[0]["time"] == int(idx[1].timestamp())
+    assert out[0]["direction"] == "CALL"
 
 
 def test_lineas_intradia_detectan_tendencias_cortas_del_dia():

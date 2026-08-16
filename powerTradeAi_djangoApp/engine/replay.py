@@ -809,12 +809,12 @@ def _line_overlaps(a: dict, b: dict) -> bool:
 
 def _confirmed_breakouts(bars: pd.DataFrame, day: date,
                          trendlines: list[dict]) -> list[dict]:
-    """Circulos en los dias previos: ruptura de linea + vela de continuidad."""
+    """Circulos por ruptura de linea + vela de continuidad."""
     if bars is None or bars.empty or len(bars) < 3:
         return []
     local = bars.index.tz_convert(NY)
-    previous = bars[local.date < day]
-    if len(previous) < 3:
+    active = bars[local.date <= day]
+    if len(active) < 3:
         return []
 
     out = []
@@ -824,7 +824,7 @@ def _confirmed_breakouts(bars: pd.DataFrame, day: date,
         points = line.get("breakout_points") or line.get("points") or []
         if len(points) < 2:
             continue
-        for session_day, session in previous.groupby(previous.index.tz_convert(NY).date):
+        for session_day, session in active.groupby(active.index.tz_convert(NY).date):
             if line.get("session_date") and line["session_date"] != str(session_day):
                 continue
             if len(session) < 3:
