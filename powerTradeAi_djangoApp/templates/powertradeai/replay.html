@@ -355,7 +355,6 @@ function drawTrendlines(currentTime = null) {
   legend.replaceChildren();
   const labels = new Set();
   allTrendlines.forEach(line => {
-    if (line.scope !== 'intradia') return;
     const points = visibleTrendlinePoints(line, currentTime);
     if (!points) return;
     const style = trendlineStyle(line);

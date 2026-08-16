@@ -19,6 +19,7 @@ def test_replay_visual_resuelve_endpoints_en_template():
     assert "Toques" in html
     assert "emaPoints" in html
     assert "drawEmaLines" in html
+    assert "line.scope !== 'intradia') return" not in html
     assert "{{" not in html and "{%" not in html
 
 
@@ -138,13 +139,14 @@ def test_trendlines_devuelven_lineas_dibujables():
         assert all("time" in point and "value" in point for point in line["points"])
 
 
-def test_trendlines_diagonales_exigen_tres_toques():
+def test_trendlines_diagonales_aceptan_dos_toques():
     from powerTradeAi_djangoApp.engine.replay import _best_diagonal_line
 
     line = _best_diagonal_line(
         [(0, 10.0), (4, 8.0)], n=6, timeframe="15m", kind="resistencia")
 
-    assert line is None
+    assert line is not None
+    assert line["touches"] == 2
 
 
 def test_breakout_confirmado_marca_la_vela_siguiente():
