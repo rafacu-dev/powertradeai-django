@@ -17,6 +17,8 @@ def test_replay_visual_resuelve_endpoints_en_template():
     assert "/panel/replay/data/" in html
     assert "trendline-list" in html
     assert "Toques" in html
+    assert "emaPoints" in html
+    assert "drawEmaLines" in html
     assert "{{" not in html and "{%" not in html
 
 

@@ -244,7 +244,8 @@ button:disabled { opacity: .55; cursor: default; }
   referrerpolicy="no-referrer"></script>
 <script>
 let chart, candles, markers = [];
-let allCandles = [], allEvents = [], allTrendlines = [], allBreakouts = [], trendlineSeries = [];
+let allCandles = [], allEvents = [], allTrendlines = [], allBreakouts = [];
+let trendlineSeries = [], emaSeries = [];
 let cursor = 0, timer = null, replayStartIndex = 0;
 
 function color(name) {
@@ -280,6 +281,11 @@ function trendlineStyle(line) {
   if (line.kind === 'soporte') return { color: '#0ca678', width: 2, style: LightweightCharts.LineStyle.Solid };
   if (line.kind === 'resistencia') return { color: '#e03131', width: 2, style: LightweightCharts.LineStyle.Solid };
   return { color: '#e67700', width: 2, style: LightweightCharts.LineStyle.Solid };
+}
+function emaStyle(period) {
+  return period === 9
+    ? { color: '#f08c00', width: 2 }
+    : { color: '#7048e8', width: 2 };
 }
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -342,7 +348,9 @@ async function loadReplay() {
 function drawTrendlines(currentTime = null) {
   if (!chart) return;
   trendlineSeries.forEach(series => chart.removeSeries(series));
+  emaSeries.forEach(series => chart.removeSeries(series));
   trendlineSeries = [];
+  emaSeries = [];
   const legend = document.getElementById('line-legend');
   legend.replaceChildren();
   const labels = new Set();
@@ -365,13 +373,59 @@ function drawTrendlines(currentTime = null) {
     const label = `${line.timeframe}${line.scope === 'intradia' ? ' intradía' : ''} ${line.kind}`;
     if (!labels.has(label)) {
       labels.add(label);
-      const item = document.createElement('span');
-      const swatch = document.createElement('i');
-      swatch.style.background = style.color;
-      item.append(swatch, document.createTextNode(label));
-      legend.appendChild(item);
+      addLegendItem(legend, style.color, label);
     }
   });
+  drawEmaLines(currentTime, legend);
+}
+function addLegendItem(legend, color, text) {
+  const item = document.createElement('span');
+  const swatch = document.createElement('i');
+  swatch.style.background = color;
+  item.append(swatch, document.createTextNode(text));
+  legend.appendChild(item);
+}
+function drawEmaLines(currentTime, legend) {
+  const visible = allCandles.filter(c => !currentTime || c.time <= currentTime);
+  [9, 20].forEach(period => {
+    const points = emaPoints(visible, period);
+    if (!points.length) return;
+    const style = emaStyle(period);
+    const series = chart.addLineSeries({
+      color: style.color,
+      lineWidth: style.width,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+      title: `EMA ${period}`,
+    });
+    series.setData(points);
+    emaSeries.push(series);
+    const current = points[points.length - 1].value;
+    addLegendItem(legend, style.color, `EMA ${period} ${current.toFixed(2)}`);
+  });
+}
+function emaPoints(candlesForView, period) {
+  if (candlesForView.length < period) return [];
+  const alpha = 2 / (period + 1);
+  let ema = null;
+  const points = [];
+  candlesForView.forEach((candle, index) => {
+    const close = Number(candle.close);
+    if (!Number.isFinite(close)) return;
+    if (index === period - 1) {
+      const seed = candlesForView
+        .slice(0, period)
+        .reduce((sum, item) => sum + Number(item.close), 0) / period;
+      ema = seed;
+    } else if (index >= period && ema != null) {
+      ema = close * alpha + ema * (1 - alpha);
+    }
+    if (ema != null) {
+      points.push({ time: candle.time, value: Number(ema.toFixed(4)) });
+    }
+  });
+  return points;
 }
 function visibleTrendlinePoints(line, currentTime) {
   if (!line.points || line.points.length < 2) return null;
