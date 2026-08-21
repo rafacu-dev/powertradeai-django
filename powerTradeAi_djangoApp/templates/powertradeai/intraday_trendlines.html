@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PowerTradeAI — Tendencias intradía</title>
+<style>
+:root {
+  --bg:#f6f7f9; --surface:#fff; --border:#e2e4e9; --text:#1a1d23;
+  --text-2:#5f6370; --text-3:#9194a0; --accent:#2f6f6d;
+  --green:#0ca678; --red:#e03131; --blue:#2563eb; --cyan:#0891b2;
+  --purple:#7048e8; --panel:#f0f4f4;
+}
+@media (prefers-color-scheme:dark) {
+  :root {
+    --bg:#111318; --surface:#1a1d24; --border:#2c2f38; --text:#e4e5e9;
+    --text-2:#a3a7b2; --text-3:#6f7480; --accent:#4dabaa;
+    --green:#20c997; --red:#ff6b6b; --blue:#74a7ff; --cyan:#22b8cf;
+    --purple:#a78bfa; --panel:#151920;
+  }
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; }
+.shell { max-width:1500px; margin:0 auto; padding:16px 20px; }
+header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:14px; flex-wrap:wrap; }
+h1 { font-size:18px; font-weight:650; }
+nav { display:flex; gap:14px; flex-wrap:wrap; }
+nav a { color:var(--accent); text-decoration:none; font-size:13px; }
+.toolbar { display:flex; align-items:end; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+.field { display:flex; flex-direction:column; gap:4px; }
+label { color:var(--text-3); font-size:11px; font-weight:650; letter-spacing:.4px; text-transform:uppercase; }
+select,button { height:38px; border-radius:6px; font:inherit; }
+select { min-width:210px; border:1px solid var(--border); background:var(--surface); color:var(--text); padding:0 10px; }
+button { border:0; background:var(--accent); color:#fff; padding:0 13px; cursor:pointer; font-weight:650; }
+button.secondary { background:var(--panel); color:var(--text); border:1px solid var(--border); }
+button.icon { width:34px; height:34px; padding:0; font-size:20px; line-height:1; }
+button:disabled { cursor:default; opacity:.45; }
+.status { color:var(--text-2); font-size:12px; min-height:18px; padding-bottom:8px; }
+.layout { display:grid; grid-template-columns:288px minmax(0,1fr); gap:12px; align-items:start; }
+.sidebar,.chart-wrap { background:var(--surface); border:1px solid var(--border); border-radius:8px; }
+.sidebar { overflow:hidden; }
+.calendar-head { display:grid; grid-template-columns:34px 1fr 34px; align-items:center; gap:6px; padding:10px; border-bottom:1px solid var(--border); }
+.month-title { text-align:center; font-weight:700; text-transform:capitalize; }
+.weekdays,.calendar-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); }
+.weekdays { padding:8px 8px 2px; }
+.weekdays span { color:var(--text-3); font-size:10px; font-weight:700; text-align:center; text-transform:uppercase; }
+.calendar-grid { gap:3px; padding:6px 8px 10px; }
+.day { position:relative; height:34px; padding:0; border:1px solid transparent; background:transparent; color:var(--text); font-weight:550; }
+.day:hover:not(:disabled) { background:var(--panel); }
+.day.selected { background:var(--accent); color:#fff; }
+.day.today:not(.selected) { border-color:var(--accent); }
+.day.viewed:not(.selected)::after { content:""; position:absolute; width:4px; height:4px; border-radius:50%; background:var(--accent); left:50%; bottom:3px; transform:translateX(-50%); }
+.day:disabled { color:var(--text-3); background:transparent; }
+.setup-head { padding:10px 12px; border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
+.setup-head strong { display:block; font-size:13px; }
+.setup-head span { color:var(--text-3); font-size:11px; }
+.setups { display:flex; flex-direction:column; max-height:340px; overflow:auto; }
+.setup { width:100%; height:auto; min-height:58px; border-radius:0; border-bottom:1px solid var(--border); background:transparent; color:var(--text); padding:8px 10px; text-align:left; }
+.setup:hover { background:var(--panel); }
+.setup-top { display:flex; justify-content:space-between; gap:8px; font-size:12px; }
+.setup-title { font-weight:700; }
+.setup-time { color:var(--text-3); font-variant-numeric:tabular-nums; }
+.setup-detail { display:flex; justify-content:space-between; gap:8px; color:var(--text-2); font-size:11px; margin-top:3px; }
+.outcome-target { color:var(--green); }
+.outcome-stop { color:var(--red); }
+.empty { color:var(--text-3); padding:18px 12px; text-align:center; }
+.chart-wrap { overflow:hidden; position:relative; min-height:690px; }
+#chart { width:100%; height:620px; }
+.loading { position:absolute; inset:0 0 69px; z-index:5; display:none; align-items:center; justify-content:center; background:color-mix(in srgb,var(--surface) 88%,transparent); color:var(--text-2); }
+.chart-footer { min-height:69px; border-top:1px solid var(--border); padding:9px 12px; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.legend { display:flex; flex-wrap:wrap; gap:8px 14px; color:var(--text-2); font-size:11px; }
+.legend span { display:inline-flex; align-items:center; gap:5px; }
+.legend i { width:17px; height:3px; display:inline-block; }
+@media (max-width:900px) {
+  .layout { grid-template-columns:1fr; }
+  .sidebar { display:grid; grid-template-columns:minmax(260px,340px) 1fr; }
+  .calendar { border-right:1px solid var(--border); }
+  .setup-head { border-top:0; }
+  #chart { height:500px; }
+  .chart-wrap { min-height:570px; }
+}
+@media (max-width:620px) {
+  .shell { padding:12px; }
+  .sidebar { display:block; }
+  .calendar { border-right:0; }
+  #chart { height:430px; }
+  .chart-wrap { min-height:500px; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>Líneas de tendencia intradía · 1 minuto</h1>
+    <nav>
+      <a href="{% url 'powertradeai:dashboard' %}">Dashboard</a>
+      <a href="{% url 'powertradeai:replay' %}">Replay 15m</a>
+      <a href="{% url 'powertradeai:chart' %}">Chart</a>
+    </nav>
+  </header>
+
+  <div class="toolbar">
+    <div class="field">
+      <label for="symbol">Símbolo</label>
+      <select id="symbol">
+        {% for symbol in symbols %}
+        <option value="{{ symbol }}" {% if symbol == "SPX" %}selected{% endif %}>{{ symbol }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button id="today-btn" class="secondary">Última sesión</button>
+    <button id="fit-btn" class="secondary" disabled>Sesión completa</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="calendar">
+        <div class="calendar-head">
+          <button id="prev-month" class="secondary icon" type="button" title="Mes anterior" aria-label="Mes anterior">‹</button>
+          <div class="month-title" id="month-title"></div>
+          <button id="next-month" class="secondary icon" type="button" title="Mes siguiente" aria-label="Mes siguiente">›</button>
+        </div>
+        <div class="weekdays"><span>L</span><span>M</span><span>X</span><span>J</span><span>V</span><span>S</span><span>D</span></div>
+        <div class="calendar-grid" id="calendar-grid"></div>
+      </div>
+      <div>
+        <div class="setup-head"><strong>Rupturas confirmadas</strong><span id="setup-summary">Sin sesión cargada</span></div>
+        <div class="setups" id="setups"><div class="empty">Selecciona una fecha.</div></div>
+      </div>
+    </aside>
+
+    <main class="chart-wrap">
+      <div class="loading" id="loading">Cargando velas de un minuto...</div>
+      <div id="chart"></div>
+      <div class="chart-footer">
+        <div class="legend">
+          <span><i style="background:var(--purple)"></i>Tendencia rota</span>
+          <span><i style="background:var(--cyan)"></i>Mínimos/máximos</span>
+          <span><i style="background:var(--blue)"></i>Entrada</span>
+          <span><i style="background:var(--green)"></i>Objetivo</span>
+          <span><i style="background:var(--red)"></i>Stop</span>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"
+  integrity="sha384-JZigAjwiaZtkUbA44CWkPaT3iBb/mU5pO6QOANp+OqHd4q+1+7MG1kzp2OOP9ZfP"
+  crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+let chart, candles;
+let lineSeries = [];
+let selectedDate = null;
+let visibleMonth = new Date();
+let currentData = null;
+const viewedKey = 'powertradeai-intraday-viewed';
+
+function color(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function dateIso(value) {
+  const y=value.getFullYear(),m=String(value.getMonth()+1).padStart(2,'0'),d=String(value.getDate()).padStart(2,'0');
+  return `${y}-${m}-${d}`;
+}
+function parseIso(value) { const [y,m,d]=value.split('-').map(Number); return new Date(y,m-1,d); }
+function viewedDates() { try { return new Set(JSON.parse(localStorage.getItem(viewedKey)||'[]')); } catch (_) { return new Set(); } }
+function markViewed(day) { const seen=viewedDates();seen.add(day);localStorage.setItem(viewedKey,JSON.stringify([...seen].slice(-500))); }
+function chartOptions() {
+  const dark=matchMedia('(prefers-color-scheme:dark)').matches;
+  return {
+    layout:{background:{type:'solid',color:dark?'#1a1d24':'#fff'},textColor:dark?'#d1d4dc':'#333'},
+    grid:{vertLines:{color:dark?'#2c2f38':'#e2e4e9'},horzLines:{color:dark?'#2c2f38':'#e2e4e9'}},
+    localization:{timeFormatter:marketTime},
+    timeScale:{timeVisible:true,secondsVisible:false,tickMarkFormatter:marketTime},
+    crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+  };
+}
+function marketTime(sec) {
+  return new Intl.DateTimeFormat('es-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(Number(sec)*1000));
+}
+function ensureChart() {
+  if(chart) return;
+  const el=document.getElementById('chart');
+  chart=LightweightCharts.createChart(el,{width:el.clientWidth,height:el.clientHeight,...chartOptions()});
+  candles=chart.addCandlestickSeries({upColor:color('--green'),downColor:color('--red'),borderUpColor:color('--green'),borderDownColor:color('--red'),wickUpColor:color('--green'),wickDownColor:color('--red')});
+  new ResizeObserver(()=>chart.applyOptions({width:el.clientWidth,height:el.clientHeight})).observe(el);
+}
+function clearLines() { lineSeries.forEach(series=>chart.removeSeries(series));lineSeries=[]; }
+function addLine(points,options) {
+  const series=chart.addLineSeries({priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false,...options});
+  series.setData(points);lineSeries.push(series);return series;
+}
+function horizontal(start,end,value,lineColor,style=LightweightCharts.LineStyle.Dashed) {
+  return addLine([{time:start,value},{time:end,value}],{color:lineColor,lineWidth:2,lineStyle:style});
+}
+function extendProjected(points,endTime) {
+  if(!points||points.length<2) return points||[];
+  const first=points[0],last=points[points.length-1];
+  if(last.time===first.time) return points;
+  const slope=(Number(last.value)-Number(first.value))/(last.time-first.time);
+  return [first,{time:endTime,value:Number(first.value)+slope*(endTime-first.time)}];
+}
+function drawSetups(setups) {
+  clearLines();
+  const markers=[];
+  setups.forEach((setup,index)=>{
+    addLine(setup.trendline,{color:color('--purple'),lineWidth:3});
+    addLine(extendProjected(setup.rejection_line,setup.exit_time),{color:color('--cyan'),lineWidth:3});
+    horizontal(setup.entry_time,setup.exit_time,setup.target_price,color('--green'));
+    horizontal(setup.entry_time,setup.exit_time,setup.stop_price,color('--red'));
+    markers.push({time:setup.entry_time,position:setup.direction==='LONG'?'belowBar':'aboveBar',color:color('--blue'),shape:setup.direction==='LONG'?'arrowUp':'arrowDown',text:`Entrada ${index+1}`});
+  });
+  candles.setMarkers(markers);
+}
+function renderSetups(setups) {
+  const box=document.getElementById('setups');box.replaceChildren();
+  document.getElementById('setup-summary').textContent=`${setups.length} señal(es) causal(es)`;
+  if(!setups.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Sin ruptura confirmada.';box.appendChild(empty);return;}
+  setups.forEach((setup,index)=>{
+    const button=document.createElement('button');button.type='button';button.className='setup';
+    const direction=setup.direction==='LONG'?'ALCISTA':'BAJISTA';
+    const outcomeClass=setup.outcome==='TARGET'?'outcome-target':setup.outcome==='STOP'?'outcome-stop':'';
+    button.innerHTML=`<div class="setup-top"><span class="setup-title">${index+1}. ${direction}</span><span class="setup-time">${formatTime(setup.confirm_time)}</span></div><div class="setup-detail"><span>Entrada ${Number(setup.entry_price).toFixed(2)}</span><span class="${outcomeClass}">${setup.outcome} · ${setup.pnl_r>0?'+':''}${Number(setup.pnl_r).toFixed(2)}R</span></div>`;
+    button.addEventListener('click',()=>focusSetup(setup));box.appendChild(button);
+  });
+}
+function focusSetup(setup) {
+  const start=Math.min(setup.trendline[0].time,setup.rejection_line[0].time)-10*60;
+  const end=setup.exit_time+10*60;chart.timeScale().setVisibleRange({from:start,to:end});
+}
+function formatTime(sec) { return new Date(sec*1000).toLocaleTimeString('es-US',{hour:'2-digit',minute:'2-digit'}); }
+async function loadDay(day) {
+  selectedDate=day;renderCalendar();
+  const symbol=document.getElementById('symbol').value,status=document.getElementById('status');
+  document.getElementById('loading').style.display='flex';status.textContent='Cargando...';
+  try {
+    const qs=new URLSearchParams({date:day,symbol});
+    const response=await fetch(`{% url 'powertradeai:intraday_trendlines_data' %}?${qs}`);
+    const data=await response.json();if(!response.ok) throw new Error(data.error||response.statusText);
+    ensureChart();currentData=data;candles.setData(data.candles||[]);drawSetups(data.setups||[]);renderSetups(data.setups||[]);
+    if((data.setups||[]).length) focusSetup(data.setups[0]); else chart.timeScale().fitContent();
+    document.getElementById('fit-btn').disabled=!(data.candles||[]).length;
+    status.textContent=`${data.date} · ${data.symbol} · ${data.candles.length} velas · ${data.setups.length} ruptura(s)`;
+    markViewed(day);renderCalendar();
+    const url=new URL(location.href);url.searchParams.set('date',day);url.searchParams.set('symbol',symbol);history.replaceState({},'',url);
+  } catch(error) {
+    status.textContent='Error: '+error.message;document.getElementById('setup-summary').textContent='Sin datos';
+    document.getElementById('setups').innerHTML='<div class="empty">Sesión no disponible.</div>';
+  } finally { document.getElementById('loading').style.display='none'; }
+}
+function renderCalendar() {
+  const grid=document.getElementById('calendar-grid'),seen=viewedDates(),today=new Date();grid.replaceChildren();
+  document.getElementById('month-title').textContent=visibleMonth.toLocaleDateString('es-US',{month:'long',year:'numeric'});
+  const year=visibleMonth.getFullYear(),month=visibleMonth.getMonth();
+  const first=new Date(year,month,1),offset=(first.getDay()+6)%7,days=new Date(year,month+1,0).getDate();
+  for(let i=0;i<offset;i++){const spacer=document.createElement('span');grid.appendChild(spacer);}
+  for(let number=1;number<=days;number++){
+    const value=new Date(year,month,number),iso=dateIso(value),button=document.createElement('button');
+    button.type='button';button.className='day';button.textContent=number;button.dataset.date=iso;
+    if(iso===selectedDate) button.classList.add('selected');
+    if(iso===dateIso(today)) button.classList.add('today');
+    if(seen.has(iso)) button.classList.add('viewed');
+    button.disabled=value.getDay()===0||value.getDay()===6||value>today;
+    button.addEventListener('click',()=>loadDay(iso));grid.appendChild(button);
+  }
+  const next=new Date(year,month+1,1);document.getElementById('next-month').disabled=next>today;
+}
+function latestWeekday() { const value=new Date();value.setDate(value.getDate()-1);while(value.getDay()===0||value.getDay()===6)value.setDate(value.getDate()-1);return value; }
+document.getElementById('prev-month').addEventListener('click',()=>{visibleMonth=new Date(visibleMonth.getFullYear(),visibleMonth.getMonth()-1,1);renderCalendar();});
+document.getElementById('next-month').addEventListener('click',()=>{visibleMonth=new Date(visibleMonth.getFullYear(),visibleMonth.getMonth()+1,1);renderCalendar();});
+document.getElementById('symbol').addEventListener('change',()=>selectedDate&&loadDay(selectedDate));
+document.getElementById('fit-btn').addEventListener('click',()=>chart&&chart.timeScale().fitContent());
+document.getElementById('today-btn').addEventListener('click',()=>{const value=latestWeekday();visibleMonth=new Date(value.getFullYear(),value.getMonth(),1);loadDay(dateIso(value));});
+
+const params=new URLSearchParams(location.search),initial=params.get('date')||dateIso(latestWeekday());
+if(params.get('symbol')) document.getElementById('symbol').value=params.get('symbol');
+selectedDate=initial;const initialDate=parseIso(initial);visibleMonth=new Date(initialDate.getFullYear(),initialDate.getMonth(),1);renderCalendar();loadDay(initial);
+</script>
+</body>
+</html>

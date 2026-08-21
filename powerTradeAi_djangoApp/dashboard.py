@@ -186,6 +186,51 @@ def replay_data(request):
     })
 
 
+@staff_member_required
+@require_GET
+def intraday_trendlines_view(request):
+    strategies = Strategy.objects.all().order_by("symbol", "strategy_id")
+    symbols = sorted(
+        {"SPX"}
+        | set(REPLAY_DEFAULT_SYMBOLS)
+        | set(strategies.values_list("symbol", flat=True))
+    )
+    return render(request, "powertradeai/intraday_trendlines.html", {
+        "symbols": symbols,
+    })
+
+
+@staff_member_required
+@require_GET
+def intraday_trendlines_data(request):
+    symbol = (request.GET.get("symbol") or "SPX").upper()
+    date_str = request.GET.get("date", "")
+    if not date_str:
+        return JsonResponse({"error": "Fecha requerida"}, status=400)
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return JsonResponse({"error": "Formato invalido (YYYY-MM-DD)"}, status=400)
+
+    from .engine.intraday_trendlines import intraday_trendline_timeline
+
+    try:
+        timeline = intraday_trendline_timeline(day, symbol)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Exception as exc:
+        log.exception("analisis de lineas intradia fallo")
+        return JsonResponse({"error": str(exc)}, status=500)
+
+    return JsonResponse({
+        "date": str(timeline.day),
+        "symbol": timeline.symbol,
+        "timeframe": timeline.timeframe,
+        "candles": timeline.candles,
+        "setups": timeline.setups,
+    })
+
+
 # ── Agente ──────────────────────────────────────────────────────────
 
 @staff_member_required

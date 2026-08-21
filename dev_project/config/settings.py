@@ -65,7 +65,10 @@ POWERTRADEAI = {
     # ThetaData FREE deniega los endpoints de acciones.
     "MARKET_DATA_PROVIDER": os.environ.get("MARKET_DATA_PROVIDER", "hybrid"),
     "HYBRID_STOCK_PROVIDER": os.environ.get("HYBRID_STOCK_PROVIDER", "alpaca"),
-    "HYBRID_OPTION_PROVIDER": os.environ.get("HYBRID_OPTION_PROVIDER", "thetadata"),
+    "HYBRID_OPTION_PROVIDER": os.environ.get(
+        "HYBRID_OPTION_PROVIDER", "thetadata_terminal"),
+    "THETADATA_TERMINAL_URL": os.environ.get(
+        "THETADATA_TERMINAL_URL", "http://127.0.0.1:25503/v3"),
     "THETADATA_API_KEY": os.environ.get("THETADATA_API_KEY"),
     "ALPACA_API_KEY": os.environ.get("ALPACA_API_KEY"),
     # El .env del repo usa ALPACA_SECRET_KEY; alpaca-py documenta

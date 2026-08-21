@@ -36,6 +36,10 @@ def get_provider(name: str | None = None) -> MarketDataProvider:
     if name == "thetadata":
         from .thetadata_cloud import ThetaDataCloudProvider
         provider = ThetaDataCloudProvider(config.get("THETADATA_API_KEY"))
+    elif name == "thetadata_terminal":
+        from .thetadata_terminal import ThetaDataTerminalProvider
+        provider = ThetaDataTerminalProvider(
+            config.get("THETADATA_TERMINAL_URL", "http://127.0.0.1:25503/v3"))
     elif name == "alpaca":
         from .alpaca_provider import AlpacaProvider
         provider = AlpacaProvider(
