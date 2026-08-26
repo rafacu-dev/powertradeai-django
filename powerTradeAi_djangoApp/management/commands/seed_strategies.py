@@ -51,20 +51,12 @@ APTAS_PARA_PAPER: tuple[tuple[str, str], ...] = (
         "26-ago-2026: mejor resultado del grid ORB; validar fills en paper",
     ),
     (
-        "SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15",
-        "26-ago-2026: candidato ORB conservador con filtro horario robusto",
-    ),
-    (
         "SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15_RANGE_INVALID",
-        "26-ago-2026: compuesta CALL close80; sale por rango, stop, TP o tiempo",
+        "26-ago-2026: ganadora del grupo ORB15 09:50 CALL; combina cierre 80, invalidacion, stop y TP",
     ),
     (
         "SPY_ORB15_0950_PUT_BODY70_TP100_STOP15",
         "26-ago-2026: candidato secundario PUT por cuerpo de ruptura",
-    ),
-    (
-        "SPY_ORB15_0950_RANGE_INVALID_STOP15",
-        "26-ago-2026: benchmark ORB-15 close90 + stop 15 para comparar paper",
     ),
     (
         "SPY_ORB5_VALIDATE_2ND_ENTER_3RD_VOL15_STOP15",

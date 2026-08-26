@@ -188,11 +188,16 @@ Debe imprimir solo las reglas explicitamente autorizadas en
 
 ```text
 SPY_ORB15_BASE_CALL_CLOSE80_TP125_STOP15
-SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15
+SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15_RANGE_INVALID
 SPY_ORB15_0950_PUT_BODY70_TP100_STOP15
-SPY_ORB15_0950_RANGE_INVALID_STOP15
 SPY_ORB5_VALIDATE_2ND_ENTER_3RD_VOL15_STOP15
 ```
+
+Quedan fuera por solape temporal del grupo ORB15 09:50 CALL:
+`SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15` y
+`SPY_ORB15_0950_RANGE_INVALID_STOP15`. La regla compuesta es la representante:
+misma familia de entrada, pero sale por el primer evento entre invalidacion de
+rango, stop, take profit o tiempo.
 
 Si la lista sale vacia, el scanner sigue corriendo y registrando `ScanRun` cada
 pasada, pero `strategies_evaluated` sera 0 y no se creara ninguna alerta.
