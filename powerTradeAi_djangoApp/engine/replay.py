@@ -151,7 +151,7 @@ def replay_timeline(day: date, symbol: str, provider=None,
     if bars.empty:
         return timeline
 
-    rows = Strategy.objects.filter(enabled=True, symbol=symbol)
+    rows = Strategy.objects.filter(replay_enabled=True, symbol=symbol)
     if strategy_ids:
         rows = rows.filter(strategy_id__in=strategy_ids)
 
@@ -990,7 +990,7 @@ def replay_day(day: date, provider=None, strategy_ids: list[str] | None = None,
             overwrite=overwrite,
         )
 
-    rows = Strategy.objects.filter(enabled=True)
+    rows = Strategy.objects.filter(replay_enabled=True)
     if strategy_ids:
         rows = rows.filter(strategy_id__in=strategy_ids)
 

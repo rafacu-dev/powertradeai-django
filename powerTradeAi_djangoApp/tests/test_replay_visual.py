@@ -7,6 +7,7 @@ def test_replay_visual_tiene_rutas_separadas():
     assert reverse("powertradeai:replay") == "/panel/replay/"
     assert reverse("powertradeai:replay_data") == "/panel/replay/data/"
     assert reverse("powertradeai:replay_action") == "/panel/replay/run/"
+    assert reverse("powertradeai:strategies_control") == "/panel/strategies/"
     assert reverse("powertradeai:seed_strategies_action") == "/panel/strategies/seed/"
 
 
@@ -55,9 +56,40 @@ def test_dashboard_enlaza_al_replay_visual():
     html = ruta.read_text(encoding="utf-8")
     assert 'id="replay-modal"' in html
     assert "Replay de reglas" in html
+    assert "Reglas" in html
     assert "openReplayModal" in html
     assert "Guardar en tabla" in html
     assert 'onclick="openReplayModal()">Replay' in html
+
+
+@pytest.mark.django_db
+def test_control_de_reglas_actualiza_live_y_replay(rf, django_user_model):
+    from powerTradeAi_djangoApp.dashboard import strategies_control_view
+    from powerTradeAi_djangoApp.models import Strategy
+
+    user = django_user_model.objects.create_user(
+        username="staff", password="x", is_staff=True)
+    first = Strategy.objects.create(
+        strategy_id="SPY_TEST_A", name="A", symbol="SPY",
+        rule_version="v1", enabled=False, replay_enabled=False)
+    second = Strategy.objects.create(
+        strategy_id="SPY_TEST_B", name="B", symbol="SPY",
+        rule_version="v1", enabled=True, replay_enabled=True)
+
+    request = rf.post(reverse("powertradeai:strategies_control"), {
+        "live": [str(first.pk)],
+        "replay": [str(second.pk)],
+    })
+    request.user = user
+    response = strategies_control_view(request)
+
+    assert response.status_code == 302
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert first.enabled is True
+    assert first.replay_enabled is False
+    assert second.enabled is False
+    assert second.replay_enabled is True
 
 
 @pytest.mark.django_db

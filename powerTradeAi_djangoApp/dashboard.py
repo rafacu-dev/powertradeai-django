@@ -14,8 +14,8 @@ from django.contrib.admin.views.decorators import staff_member_required
 from django.core.management import call_command
 from django.db.models import Avg, Count, Q, Sum
 from django.http import JsonResponse
-from django.shortcuts import render
-from django.views.decorators.http import require_GET, require_POST
+from django.shortcuts import redirect, render
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from .models import Alert, Strategy
 
@@ -149,19 +149,60 @@ def seed_strategies_action(request):
         log.exception("seed_strategies desde dashboard fallo")
         return JsonResponse({"error": str(exc)}, status=500)
 
-    enabled = list(Strategy.objects.filter(enabled=True)
+    live = list(Strategy.objects.filter(enabled=True)
                    .values_list("strategy_id", flat=True)
                    .order_by("strategy_id"))
+    replay = list(Strategy.objects.filter(replay_enabled=True)
+                  .values_list("strategy_id", flat=True)
+                  .order_by("strategy_id"))
     return JsonResponse({
-        "enabled": enabled,
-        "total": len(enabled),
+        "enabled": live,
+        "replay_enabled": replay,
+        "total": len(live),
+    })
+
+
+@staff_member_required
+@require_http_methods(["GET", "POST"])
+def strategies_control_view(request):
+    """Control operacional: que reglas viven en live y cuales en replay."""
+    if request.method == "POST":
+        rows = list(Strategy.objects.all())
+        live_ids = {
+            int(value) for value in request.POST.getlist("live")
+            if value.isdigit()
+        }
+        replay_ids = {
+            int(value) for value in request.POST.getlist("replay")
+            if value.isdigit()
+        }
+        for row in rows:
+            live = row.pk in live_ids
+            replay = row.pk in replay_ids
+            changes = []
+            if row.enabled != live:
+                row.enabled = live
+                changes.append("enabled")
+            if row.replay_enabled != replay:
+                row.replay_enabled = replay
+                changes.append("replay_enabled")
+            if changes:
+                row.save(update_fields=[*changes, "updated_at"])
+        return redirect("powertradeai:strategies_control")
+
+    strategies = Strategy.objects.all().order_by("symbol", "strategy_id")
+    return render(request, "powertradeai/strategies.html", {
+        "strategies": strategies,
+        "live_count": Strategy.objects.filter(enabled=True).count(),
+        "replay_count": Strategy.objects.filter(replay_enabled=True).count(),
     })
 
 
 @staff_member_required
 @require_GET
 def replay_view(request):
-    strategies = Strategy.objects.all().order_by("symbol", "strategy_id")
+    strategies = Strategy.objects.filter(replay_enabled=True).order_by(
+        "symbol", "strategy_id")
     symbols = sorted(
         set(REPLAY_DEFAULT_SYMBOLS) | set(strategies.values_list("symbol", flat=True)))
     return render(request, "powertradeai/replay.html", {

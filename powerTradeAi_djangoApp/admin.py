@@ -9,10 +9,13 @@ from .models import (
 
 @admin.register(Strategy)
 class StrategyAdmin(admin.ModelAdmin):
-    list_display = ("strategy_id", "symbol", "rule_version", "enabled", "contracts")
-    list_filter = ("enabled", "symbol")
+    list_display = (
+        "strategy_id", "symbol", "rule_version", "enabled",
+        "replay_enabled", "contracts",
+    )
+    list_filter = ("enabled", "replay_enabled", "symbol")
     search_fields = ("strategy_id", "name")
-    list_editable = ("enabled", "contracts")
+    list_editable = ("enabled", "replay_enabled", "contracts")
 
 
 @admin.register(Alert)

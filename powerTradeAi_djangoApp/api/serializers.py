@@ -26,7 +26,7 @@ class StrategySerializer(serializers.ModelSerializer):
         model = Strategy
         fields = [
             "strategy_id", "name", "symbol", "rule_version",
-            "enabled", "contracts", "commission", "params",
+            "enabled", "replay_enabled", "contracts", "commission", "params",
         ]
 
     def get_params(self, obj: Strategy):

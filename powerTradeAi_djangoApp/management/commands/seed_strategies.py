@@ -25,9 +25,9 @@ COMO ANADIR UNA REGLA
    motivo en el comentario de al lado.
 3. Se despliega y se ejecuta ``seed_strategies``.
 
-No se activa nada desde el admin como via normal. El admin sigue permitiendolo
-para una prueba puntual, pero el siguiente ``seed_strategies`` lo revierte: la
-fuente de verdad es esta lista, no la base de datos.
+La lista marca el arranque recomendado. En produccion, el deploy puede correr
+``seed_strategies --preserve-enabled`` para no pisar las decisiones tomadas en
+la vista de control de reglas.
 
 BORRAR NO ES UNA OPCION
 -----------------------
@@ -69,7 +69,7 @@ _APTAS_IDS = frozenset(strategy_id for strategy_id, _ in APTAS_PARA_PAPER)
 
 class Command(BaseCommand):
     help = ("Crea o actualiza las Strategy del catalogo. Solo deja activas las "
-            "de APTAS_PARA_PAPER (hoy: ninguna).")
+            "de APTAS_PARA_PAPER, salvo que uses --preserve-enabled.")
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -77,8 +77,8 @@ class Command(BaseCommand):
             help="Crea las reglas nuevas desactivadas, para revisarlas antes.")
         parser.add_argument(
             "--preserve-enabled", action="store_true",
-            help="No toca el campo enabled existente. Para una prueba manual "
-                 "que no quieres que el seed revierta.")
+            help="No toca enabled ni replay_enabled existentes. Para preservar "
+                 "lo marcado desde la vista de control.")
 
     def handle(self, *args, **options):
         created = updated = 0
@@ -96,6 +96,8 @@ class Command(BaseCommand):
             # una regla huérfana no puede quedar activa por omision del loop.
             updated += Strategy.objects.filter(enabled=True).exclude(
                 strategy_id__in=allowed_ids).update(enabled=False)
+            updated += Strategy.objects.filter(replay_enabled=True).exclude(
+                strategy_id__in=allowed_ids).update(replay_enabled=False)
 
         for strategy_id, cls in sorted(all_strategies().items()):
             should_enable = strategy_id in allowed_ids
@@ -107,6 +109,7 @@ class Command(BaseCommand):
                     "rule_version": cls.rule_version,
                     "params": dict(cls.default_params),
                     "enabled": should_enable,
+                    "replay_enabled": should_enable,
                 },
             )
             if was_created:
@@ -128,6 +131,10 @@ class Command(BaseCommand):
                     and row.enabled != should_enable):
                 row.enabled = should_enable
                 changes.append("enabled")
+            if (not options["preserve_enabled"]
+                    and row.replay_enabled != should_enable):
+                row.replay_enabled = should_enable
+                changes.append("replay_enabled")
             if changes:
                 row.save(update_fields=[*changes, "updated_at"])
                 updated += 1

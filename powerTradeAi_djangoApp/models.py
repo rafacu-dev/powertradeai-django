@@ -30,6 +30,10 @@ class Strategy(models.Model):
     symbol = models.CharField(max_length=16, db_index=True)
     rule_version = models.CharField(max_length=80)
     enabled = models.BooleanField(default=True)
+    replay_enabled = models.BooleanField(
+        default=False,
+        help_text="Permite evaluar esta regla en replay visual/overlay sin activarla en live.",
+    )
     # Parametros de la regla que pueden variar sin tocar codigo (buffer,
     # hold_minutes, umbrales). Cada regla documenta las claves que consume.
     params = models.JSONField(default=dict, blank=True)

@@ -24,7 +24,7 @@ pytestmark = pytest.mark.django_db
 def _strategy() -> Strategy:
     return Strategy.objects.create(
         strategy_id="SPY_ORB15_BASE", name="ORB base", symbol="SPY",
-        rule_version="orb15_base_causal_v3", params={})
+        rule_version="orb15_base_causal_v3", params={}, replay_enabled=True)
 
 
 def _alert(strategy, *, source, day, net, direction="CALL") -> Alert:
@@ -140,7 +140,7 @@ def test_replay_overwrite_es_atomico_ante_fallo(monkeypatch):
     first = _strategy()
     second = Strategy.objects.create(
         strategy_id="ZZ_TEST_REPLAY", name="segunda", symbol="QQQ",
-        rule_version="v1", params={}, enabled=True,
+        rule_version="v1", params={}, enabled=True, replay_enabled=True,
     )
     day = date(2026, 7, 17)
     previous = _alert(
