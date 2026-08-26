@@ -10,7 +10,7 @@ from .dashboard import (
     agent_launch, agent_train_launch, agent_view, chart_chat, chart_data,
     chart_price, chart_view, convexidad_data, convexidad_view, dashboard,
     intraday_trendlines_data, intraday_trendlines_view, replay_action,
-    replay_data, replay_view, scanner_data,
+    replay_data, replay_view, scanner_data, seed_strategies_action,
 )
 
 app_name = "powertradeai"
@@ -20,6 +20,7 @@ urlpatterns = [
     path("replay/", replay_view, name="replay"),
     path("replay/data/", replay_data, name="replay_data"),
     path("replay/run/", replay_action, name="replay_action"),
+    path("strategies/seed/", seed_strategies_action, name="seed_strategies_action"),
     path("intraday-trendlines/", intraday_trendlines_view,
          name="intraday_trendlines"),
     path("intraday-trendlines/data/", intraday_trendlines_data,

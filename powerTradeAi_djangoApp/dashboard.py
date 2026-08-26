@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.contrib.admin.views.decorators import staff_member_required
+from django.core.management import call_command
 from django.db.models import Avg, Count, Q, Sum
 from django.http import JsonResponse
 from django.shortcuts import render
@@ -133,7 +134,27 @@ def replay_action(request):
         "total": len(result.alerts),
         "closed": len(result.closed),
         "net": str(result.net_total),
+        "skipped": [{"rule": s, "detail": d} for s, d in result.skipped],
         "errors": [{"rule": s, "detail": d} for s, d in result.errors],
+    })
+
+
+@staff_member_required
+@require_POST
+def seed_strategies_action(request):
+    """Reaplica el catalogo operable desde la UI staff."""
+    try:
+        call_command("seed_strategies", verbosity=0)
+    except Exception as exc:
+        log.exception("seed_strategies desde dashboard fallo")
+        return JsonResponse({"error": str(exc)}, status=500)
+
+    enabled = list(Strategy.objects.filter(enabled=True)
+                   .values_list("strategy_id", flat=True)
+                   .order_by("strategy_id"))
+    return JsonResponse({
+        "enabled": enabled,
+        "total": len(enabled),
     })
 
 

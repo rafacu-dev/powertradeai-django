@@ -207,6 +207,7 @@ button:disabled { opacity: .55; cursor: default; }
       </select>
     </div>
     <button id="load-btn">Cargar día</button>
+    <button id="seed-btn" class="secondary">Activar reglas ORB</button>
     <button id="save-btn" class="secondary">Guardar alertas</button>
     <button id="play-btn" class="secondary" disabled>Play</button>
     <div class="status" id="status"></div>
@@ -375,9 +376,38 @@ async function saveReplayAlerts() {
     if (!resp.ok) throw new Error(data.error || resp.statusText);
     const dashboardUrl = "{% url 'powertradeai:dashboard' %}" +
       `?source=replay&desde=${encodeURIComponent(data.day)}&hasta=${encodeURIComponent(data.day)}`;
+    const diagnostics = [...(data.errors || []), ...(data.skipped || [])]
+      .slice(0, 6)
+      .map(item => `${escapeHtml(item.rule)}: ${escapeHtml(item.detail)}`)
+      .join('<br>');
     status.innerHTML =
       `${escapeHtml(data.day)} · ${escapeHtml(data.total)} alerta(s) guardada(s) · ` +
-      `<a href="${dashboardUrl}">ver en tabla</a>`;
+      `<a href="${dashboardUrl}">ver en tabla</a>` +
+      `${diagnostics ? `<br>${diagnostics}` : ''}`;
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function seedStrategies() {
+  const status = document.getElementById('status');
+  const btn = document.getElementById('seed-btn');
+  btn.disabled = true;
+  status.textContent = 'Activando reglas ORB...';
+  try {
+    const resp = await fetch("{% url 'powertradeai:seed_strategies_action' %}", {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+      },
+      body: new URLSearchParams(),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    status.textContent = `${data.total} regla(s) activas. Recarga el día para evaluar el set nuevo.`;
+    await loadReplay();
   } catch (err) {
     status.textContent = 'Error: ' + err.message;
   } finally {
@@ -639,6 +669,7 @@ function stop() {
 
 document.getElementById('symbol').addEventListener('change', filterStrategyOptions);
 document.getElementById('load-btn').addEventListener('click', loadReplay);
+document.getElementById('seed-btn').addEventListener('click', seedStrategies);
 document.getElementById('save-btn').addEventListener('click', saveReplayAlerts);
 document.getElementById('play-btn').addEventListener('click', play);
 document.getElementById('step-btn').addEventListener('click', step);

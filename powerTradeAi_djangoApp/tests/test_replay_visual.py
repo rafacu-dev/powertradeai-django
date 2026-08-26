@@ -7,6 +7,7 @@ def test_replay_visual_tiene_rutas_separadas():
     assert reverse("powertradeai:replay") == "/panel/replay/"
     assert reverse("powertradeai:replay_data") == "/panel/replay/data/"
     assert reverse("powertradeai:replay_action") == "/panel/replay/run/"
+    assert reverse("powertradeai:seed_strategies_action") == "/panel/strategies/seed/"
 
 
 def test_replay_visual_resuelve_endpoints_en_template():
@@ -15,6 +16,8 @@ def test_replay_visual_resuelve_endpoints_en_template():
         "strategies": [],
     })
     assert "/panel/replay/data/" in html
+    assert "/panel/strategies/seed/" in html
+    assert "Activar reglas ORB" in html
     assert "trendline-list" in html
     assert "Toques" in html
     assert "emaPoints" in html

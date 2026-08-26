@@ -430,6 +430,7 @@ tbody tr:hover { background: var(--bg); }
     <input type="date" id="replay-date" name="date" value="{{ filters.hasta|default:filters.desde }}">
   </div>
   <div class="replay-actions">
+    <button type="button" class="btn btn-ghost" id="seed-btn" onclick="seedStrategies()">Activar reglas ORB</button>
     <button type="button" class="btn btn-ghost" id="replay-calc-btn" onclick="runReplay(false)">Calcular</button>
     <button type="button" class="btn btn-primary" id="replay-save-btn" onclick="runReplay(true)">Guardar en tabla</button>
   </div>
@@ -674,6 +675,7 @@ async function runReplay(save) {
   const dateInput = document.getElementById('replay-date');
   const status = document.getElementById('replay-status');
   const resultBox = document.getElementById('replay-result');
+  const seedBtn = document.getElementById('seed-btn');
   const calcBtn = document.getElementById('replay-calc-btn');
   const saveBtn = document.getElementById('replay-save-btn');
   const date = dateInput.value;
@@ -682,6 +684,7 @@ async function runReplay(save) {
     return;
   }
 
+  seedBtn.disabled = true;
   calcBtn.disabled = true;
   saveBtn.disabled = true;
   status.textContent = save ? 'Guardando replay...' : 'Calculando replay...';
@@ -709,7 +712,13 @@ async function runReplay(save) {
 
     const dashboardUrl = "{% url 'powertradeai:dashboard' %}" +
       `?source=replay&desde=${encodeURIComponent(data.day)}&hasta=${encodeURIComponent(data.day)}`;
-    status.textContent = `${data.day} · ${data.total} alerta(s) · neto $${data.net}`;
+    const diagnostics = [...(data.errors || []), ...(data.skipped || [])]
+      .slice(0, 6)
+      .map(item => `${escapeHtml(item.rule)}: ${escapeHtml(item.detail)}`)
+      .join('<br>');
+    status.innerHTML =
+      `${escapeHtml(data.day)} · ${escapeHtml(data.total)} alerta(s) · neto $${escapeHtml(data.net)}` +
+      `${diagnostics ? `<br>${diagnostics}` : ''}`;
 
     const rows = data.alerts.map(a =>
       `<tr><td>${escapeHtml(a.strategy)}</td><td>${escapeHtml(a.direction)}</td>` +
@@ -727,8 +736,33 @@ async function runReplay(save) {
   } catch (err) {
     status.textContent = 'Error: ' + err.message;
   } finally {
+    seedBtn.disabled = false;
     calcBtn.disabled = false;
     saveBtn.disabled = false;
+  }
+}
+
+async function seedStrategies() {
+  const status = document.getElementById('replay-status');
+  const btn = document.getElementById('seed-btn');
+  btn.disabled = true;
+  status.textContent = 'Activando reglas ORB...';
+  try {
+    const resp = await fetch("{% url 'powertradeai:seed_strategies_action' %}", {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+      },
+      body: new URLSearchParams(),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'No se pudieron activar reglas');
+    status.textContent = `${data.total} regla(s) activas. Ya puedes guardar replay.`;
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 
