@@ -175,6 +175,13 @@ header h1 span {
 .dot-price.green { background: var(--green); }
 .dot-price.red { background: var(--red); }
 .scanner td.tv-cell { text-align: center; }
+.live-rule-form { padding: 16px; }
+.live-rule-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:8px; margin-bottom:14px; }
+.live-rule { display:flex; gap:10px; align-items:flex-start; padding:10px; border:1px solid var(--border); border-radius:var(--radius); cursor:pointer; }
+.live-rule:has(input:checked) { border-color:var(--accent); background:var(--green-bg); }
+.live-rule input { margin-top:3px; accent-color:var(--accent); }
+.live-rule strong, .live-rule small { display:block; }
+.live-rule small { color:var(--text-3); margin-top:2px; }
 .tv-link {
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--text-3); transition: color 0.15s;
@@ -414,6 +421,7 @@ tbody tr:hover { background: var(--bg); }
     <a href="{% url 'powertradeai:agent' %}" class="logout">Agente</a>
     <a href="{% url 'powertradeai:chart' %}" class="logout">Chart</a>
     <button type="button" class="logout nav-button" onclick="openReplayModal()">Replay</button>
+    <a href="{% url 'powertradeai:scanner' %}" class="logout">Scanner</a>
     <a href="{% url 'powertradeai:strategies_control' %}" class="logout">Reglas</a>
     <a href="{% url 'powertradeai:intraday_trendlines' %}" class="logout">Tendencias 1m</a>
     <a href="{% url 'powertradeai:convexidad' %}" class="logout">Convexidad</a>
@@ -421,21 +429,25 @@ tbody tr:hover { background: var(--bg); }
   </div>
 </header>
 
-<!-- Scanner de apertura vs Bollinger -->
-<div class="scanner">
+<div class="scanner rules-card">
   <div class="scanner-head">
-    <div>
-      <span class="scanner-title">Scanner de apertura</span>
-      <span class="scanner-sub">Bollinger 15m (20,2) vs apertura · pesa contra-tendencia (MA20/MA40 en 1h)</span>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center">
-      <span class="scanner-status" id="scanner-status"></span>
-      <button class="btn" id="scanner-btn" onclick="loadScanner()">Escanear</button>
-    </div>
+    <div><span class="scanner-title">Reglas para evaluar en live</span>
+      <span class="scanner-sub">El worker solo usara las reglas marcadas. Replay mantiene su seleccion independiente.</span></div>
+    <a class="btn" href="{% url 'powertradeai:strategies_control' %}">Gestionar reglas</a>
   </div>
-  <div class="scanner-body" id="scanner-body">
-    <div class="scanner-empty">Pulsa &laquo;Escanear&raquo; para calcular.</div>
-  </div>
+  <form method="post" action="{% url 'powertradeai:strategies_control' %}" class="live-rule-form">
+    {% csrf_token %}
+    {% for strategy in replay_strategies %}<input type="hidden" name="replay" value="{{ strategy.pk }}">{% endfor %}
+    <div class="live-rule-grid">
+      {% for strategy in strategies %}
+      <label class="live-rule {% if strategy.enabled %}selected{% endif %}">
+        <input type="checkbox" name="live" value="{{ strategy.pk }}" {% if strategy.enabled %}checked{% endif %}>
+        <span><strong>{{ strategy.strategy_id }}</strong><small>{{ strategy.symbol }} · {{ strategy.name }}</small></span>
+      </label>
+      {% empty %}<span class="scanner-empty">No hay reglas sembradas.</span>{% endfor %}
+    </div>
+    <button class="btn" type="submit">Guardar reglas live</button>
+  </form>
 </div>
 
 <div class="modal-backdrop" id="replay-modal" aria-hidden="true">

@@ -69,12 +69,13 @@ def dashboard(request):
         if total_closed else None
     )
 
-    strategies = Strategy.objects.values_list("strategy_id", flat=True).order_by("strategy_id")
+    strategies = Strategy.objects.all().order_by("symbol", "strategy_id")
 
     return render(request, "powertradeai/dashboard.html", {
         "alerts": qs[:200],
         "stats": stats,
         "strategies": strategies,
+        "replay_strategies": Strategy.objects.filter(replay_enabled=True),
         "filters": {
             "source": source,
             "evaluation_version": evaluation_version,
@@ -210,6 +211,12 @@ def replay_view(request):
         "strategies": strategies,
         "default_symbols": REPLAY_DEFAULT_SYMBOLS,
     })
+
+
+@staff_member_required
+@require_GET
+def scanner_view(request):
+    return render(request, "powertradeai/scanner.html")
 
 
 @staff_member_required
