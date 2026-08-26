@@ -250,54 +250,61 @@ header h1 span {
   border: 1px solid var(--border);
 }
 
-/* ---- Replay panel ---- */
-.replay-panel {
+/* ---- Replay modal ---- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.45);
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+  width: min(760px, 100%);
+  max-height: min(720px, calc(100vh - 40px));
+  overflow: auto;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 24px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+}
+.modal-head {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-title { font-size: 16px; font-weight: 600; }
+.modal-body { padding: 16px; }
+.modal-controls {
+  display: flex;
   gap: 10px;
   align-items: flex-end;
+  flex-wrap: wrap;
 }
-
-.replay-panel .filter-group input[type="date"] {
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-}
-
 .replay-status {
+  margin-top: 12px;
   font-size: 13px;
   color: var(--text-2);
-  margin-left: 8px;
-  align-self: center;
 }
-
 .replay-result {
-  width: 100%;
-  margin-top: 8px;
+  margin-top: 12px;
   display: none;
+  overflow-x: auto;
 }
-
 .replay-result.visible { display: block; }
-
-.replay-result table {
-  width: 100%;
-}
-
-.replay-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
+.replay-result table { width: 100%; }
+.icon-btn {
+  width: 34px;
+  padding: 0;
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid var(--border);
 }
 
 /* ---- Table ---- */
@@ -385,7 +392,7 @@ tbody tr:hover { background: var(--bg); }
 /* ---- Responsive ---- */
 @media (max-width: 600px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
-  .filters-bar, .replay-panel { flex-direction: column; align-items: stretch; }
+  .filters-bar, .modal-controls { flex-direction: column; align-items: stretch; }
   .filter-group select, .filter-group input[type="date"] { width: 100%; }
 }
 </style>
@@ -396,6 +403,7 @@ tbody tr:hover { background: var(--bg); }
 <header>
   <h1><span>Power</span>TradeAI</h1>
   <div style="display:flex;gap:16px;align-items:center">
+    <button type="button" class="btn btn-primary" onclick="openReplayModal()">Replay</button>
     <a href="{% url 'powertradeai:agent' %}" class="logout">Agente</a>
     <a href="{% url 'powertradeai:chart' %}" class="logout">Chart</a>
     <a href="{% url 'powertradeai:replay' %}" class="logout">Replay</a>
@@ -422,21 +430,30 @@ tbody tr:hover { background: var(--bg); }
   </div>
 </div>
 
-<!-- Replay -->
-<form class="replay-panel" id="replay-form" onsubmit="return false;">
+<div class="modal-backdrop" id="replay-modal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="replay-modal-title">
+    <div class="modal-head">
+      <div class="modal-title" id="replay-modal-title">Replay de reglas</div>
+      <button type="button" class="btn icon-btn" onclick="closeReplayModal()" aria-label="Cerrar replay">X</button>
+    </div>
+    <div class="modal-body">
+      <form id="replay-form" onsubmit="return false;">
   {% csrf_token %}
-  <div class="filter-group">
-    <label>Replay</label>
-    <input type="date" id="replay-date" name="date" value="{{ filters.hasta|default:filters.desde }}">
+        <div class="modal-controls">
+          <div class="filter-group">
+            <label>Fecha</label>
+            <input type="date" id="replay-date" name="date" value="{{ filters.hasta|default:filters.desde }}">
+          </div>
+          <button type="button" class="btn btn-ghost" id="seed-btn" onclick="seedStrategies()">Activar reglas ORB</button>
+          <button type="button" class="btn btn-ghost" id="replay-calc-btn" onclick="runReplay(false)">Calcular</button>
+          <button type="button" class="btn btn-primary" id="replay-save-btn" onclick="runReplay(true)">Guardar en tabla</button>
+        </div>
+        <div class="replay-status" id="replay-status"></div>
+        <div class="replay-result" id="replay-result"></div>
+      </form>
+    </div>
   </div>
-  <div class="replay-actions">
-    <button type="button" class="btn btn-ghost" id="seed-btn" onclick="seedStrategies()">Activar reglas ORB</button>
-    <button type="button" class="btn btn-ghost" id="replay-calc-btn" onclick="runReplay(false)">Calcular</button>
-    <button type="button" class="btn btn-primary" id="replay-save-btn" onclick="runReplay(true)">Guardar en tabla</button>
-  </div>
-  <span class="replay-status" id="replay-status"></span>
-  <div class="replay-result" id="replay-result"></div>
-</form>
+</div>
 
 <!-- Stats -->
 <div class="stats">
@@ -569,6 +586,19 @@ const SCAN_STATUS = {
   DENTRO:       { cls: 'inside',  row: '',         label: 'Dentro' },
   PENDIENTE:    { cls: 'pending', row: '',         label: 'Sin apertura' },
 };
+
+function openReplayModal() {
+  const modal = document.getElementById('replay-modal');
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  document.getElementById('replay-date').focus();
+}
+
+function closeReplayModal() {
+  const modal = document.getElementById('replay-modal');
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+}
 
 async function loadScanner() {
   const btn = document.getElementById('scanner-btn');
@@ -765,6 +795,13 @@ async function seedStrategies() {
     btn.disabled = false;
   }
 }
+
+document.getElementById('replay-modal').addEventListener('click', event => {
+  if (event.target.id === 'replay-modal') closeReplayModal();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeReplayModal();
+});
 
 </script>
 </body>

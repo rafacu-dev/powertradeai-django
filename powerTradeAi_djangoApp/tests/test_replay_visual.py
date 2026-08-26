@@ -52,7 +52,12 @@ def test_dashboard_enlaza_al_replay_visual():
 
     ruta = (Path(powerTradeAi_djangoApp.__file__).parent
             / "templates" / "powertradeai" / "dashboard.html")
-    assert "powertradeai:replay" in ruta.read_text(encoding="utf-8")
+    html = ruta.read_text(encoding="utf-8")
+    assert "powertradeai:replay" in html
+    assert 'id="replay-modal"' in html
+    assert "Replay de reglas" in html
+    assert "openReplayModal" in html
+    assert "Guardar en tabla" in html
 
 
 @pytest.mark.django_db
