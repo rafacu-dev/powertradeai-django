@@ -31,7 +31,7 @@ REPLAY_DEFAULT_SYMBOLS = (
 def dashboard(request):
     params = request.GET
     source = params.get("source", Alert.Source.LIVE)
-    evaluation_version = params.get("evaluation_version", "investep_v2")
+    evaluation_version = params.get("evaluation_version", "all")
     strategy_id = params.get("strategy", "")
     direction = params.get("direction", "")
     desde = params.get("desde", "")

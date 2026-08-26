@@ -14,6 +14,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from django.http import HttpResponse
 
 from powerTradeAi_djangoApp.models import Alert, ApiKey, ReplayRun, Strategy
 
@@ -265,6 +266,39 @@ def test_dashboard_replay_puede_guardar_en_tabla(monkeypatch):
     payload = json.loads(response.content)
     assert payload["saved"] is True
     assert payload["overwritten"] is True
+
+
+def test_dashboard_muestra_replay_legacy_sin_filtro_oculto(rf, monkeypatch):
+    from powerTradeAi_djangoApp import dashboard
+
+    strategy = _strategy()
+    alert = _alert(
+        strategy,
+        source=Alert.Source.REPLAY,
+        day=date(2026, 8, 26),
+        net=125,
+    )
+    alert.evaluation_version = "legacy_v1"
+    alert.save(update_fields=["evaluation_version"])
+
+    request = rf.get(
+        "/panel/",
+        {"source": "replay", "desde": "2026-08-26", "hasta": "2026-08-26"},
+    )
+    request.user = SimpleNamespace(is_active=True, is_staff=True)
+    captured = {}
+
+    def capture_render(request, template, context):
+        captured.update(context)
+        return HttpResponse("ok")
+
+    monkeypatch.setattr(dashboard, "render", capture_render)
+
+    response = dashboard.dashboard(request)
+
+    assert response.status_code == 200
+    assert list(captured["alerts"]) == [alert]
+    assert captured["filters"]["evaluation_version"] == "all"
 
 
 # --- API ----------------------------------------------------------------
