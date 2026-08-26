@@ -189,6 +189,8 @@ def strategies_control_view(request):
                 changes.append("replay_enabled")
             if changes:
                 row.save(update_fields=[*changes, "updated_at"])
+        if request.POST.get("return_to") == "dashboard":
+            return redirect("powertradeai:dashboard")
         return redirect("powertradeai:strategies_control")
 
     strategies = Strategy.objects.all().order_by("symbol", "strategy_id")

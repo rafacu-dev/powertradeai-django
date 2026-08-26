@@ -442,6 +442,7 @@ tbody tr:hover { background: var(--bg); }
   </div>
   <form method="post" action="{% url 'powertradeai:strategies_control' %}" class="live-rule-form">
     {% csrf_token %}
+    <input type="hidden" name="return_to" value="dashboard">
     {% for strategy in replay_strategies %}<input type="hidden" name="replay" value="{{ strategy.pk }}">{% endfor %}
     <details class="live-rule-details">
       <summary>Mostrar reglas configurables</summary>
@@ -449,7 +450,7 @@ tbody tr:hover { background: var(--bg); }
         <thead><tr><th>Simbolo</th><th>Regla</th><th>Descripcion</th><th>Live</th></tr></thead>
         <tbody>
           {% for strategy in strategies %}
-          <tr><td>{{ strategy.symbol }}</td><td class="rule-id">{{ strategy.strategy_id }}</td><td class="rule-name">{{ strategy.name }}</td><td><input type="checkbox" name="live" value="{{ strategy.pk }}" {% if strategy.enabled %}checked{% endif %} aria-label="Evaluar {{ strategy.strategy_id }} en live"></td></tr>
+          <tr class="live-rule-row"><td>{{ strategy.symbol }}</td><td class="rule-id">{{ strategy.strategy_id }}</td><td class="rule-name">{{ strategy.name }}</td><td><input type="checkbox" name="live" value="{{ strategy.pk }}" {% if strategy.enabled %}checked{% endif %} aria-label="Evaluar {{ strategy.strategy_id }} en live"></td></tr>
           {% empty %}<tr><td colspan="4" class="scanner-empty">No hay reglas sembradas.</td></tr>{% endfor %}
         </tbody>
       </table></div>
@@ -457,6 +458,13 @@ tbody tr:hover { background: var(--bg); }
     </details>
   </form>
 </div>
+<script>
+document.querySelectorAll('.live-rule-row').forEach(row => row.addEventListener('click', event => {
+  if (event.target.matches('input')) return;
+  const checkbox = row.querySelector('input[type="checkbox"]');
+  checkbox.checked = !checkbox.checked;
+}));
+</script>
 
 <div class="modal-backdrop" id="replay-modal" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="replay-modal-title">
