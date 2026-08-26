@@ -51,8 +51,8 @@ APTAS_PARA_PAPER: tuple[tuple[str, str], ...] = (
         "26-ago-2026: mejor resultado del grid ORB; validar fills en paper",
     ),
     (
-        "SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15_RANGE_INVALID",
-        "26-ago-2026: ganadora del grupo ORB15 09:50 CALL; combina cierre 80, invalidacion, stop y TP",
+        "SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15",
+        "26-ago-2026: mejor ORB15 09:50 CALL; mayor edge anual/promedio por trade",
     ),
     (
         "SPY_ORB15_0950_PUT_BODY70_TP100_STOP15",
