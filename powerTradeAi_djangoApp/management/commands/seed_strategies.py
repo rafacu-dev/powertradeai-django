@@ -55,6 +55,10 @@ APTAS_PARA_PAPER: tuple[tuple[str, str], ...] = (
         "26-ago-2026: candidato ORB conservador con filtro horario robusto",
     ),
     (
+        "SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15_RANGE_INVALID",
+        "26-ago-2026: compuesta CALL close80; sale por rango, stop, TP o tiempo",
+    ),
+    (
         "SPY_ORB15_0950_PUT_BODY70_TP100_STOP15",
         "26-ago-2026: candidato secundario PUT por cuerpo de ruptura",
     ),

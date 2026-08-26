@@ -457,7 +457,7 @@ def test_seed_deja_activas_solo_las_orb_promovidas_a_paper():
     enabled = set(Strategy.objects.filter(enabled=True).values_list(
         "strategy_id", flat=True))
     assert enabled == {strategy_id for strategy_id, _ in APTAS_PARA_PAPER}
-    assert len(enabled) == 5
+    assert len(enabled) == 6
     # El catalogo se conserva entero: apagar no es borrar.
     assert Strategy.objects.count() > 100
 

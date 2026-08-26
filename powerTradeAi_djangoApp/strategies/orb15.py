@@ -404,11 +404,12 @@ class SpyOrb150950RangeInvalidStop15(SpyOrb150950RangeInvalid):
 
 
 class Orb15StopTargetMixin:
-    """Gestion por prima: stop y take profit; gana el evento mas temprano."""
+    """Gestion combinada: invalidacion de rango, stop y TP; gana el primero."""
 
     def check_exit(self, ctx: ScanContext, alert) -> ExitDecision:
         fired = [
             d for d in (
+                Orb15Base.check_exit(self, ctx, alert),
                 SpyOrb150950RangeInvalidStop15._option_stop_exit(self, ctx, alert),
                 SpyOrb150950RangeInvalidStop15._option_take_profit_exit(
                     self, ctx, alert),
@@ -454,6 +455,21 @@ class SpyOrb150950CallClose80Tp125Stop15(Orb15StopTargetMixin, SpyOrb150950):
         "option_stop_pct": STOP_PCT,
         "option_stop_lead_seconds": STOP_LEAD_SECONDS,
         "option_take_profit_pct": PAPER_TP_CALL,
+    }
+
+
+@register
+class SpyOrb150950CallClose80Tp125Stop15RangeInvalid(
+        Orb15StopTargetMixin, SpyOrb150950):
+    strategy_id = "SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15_RANGE_INVALID"
+    name = (
+        "SPY ORB-15 9:50 CALL cierre 80% + invalidacion rango + "
+        "TP 125% + stop 15%"
+    )
+    rule_version = "orb15_0950_call_close80_range_invalid_tp125_stop15_causal_v1"
+    default_params = {
+        **SpyOrb150950CallClose80Tp125Stop15.default_params,
+        "range_invalidation": True,
     }
 
 

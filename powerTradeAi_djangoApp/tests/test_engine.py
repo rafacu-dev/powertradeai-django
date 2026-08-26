@@ -279,6 +279,75 @@ def test_take_profit_de_prima_cierra_antes_que_el_reloj():
     assert decision.at.astimezone(NY).strftime("%H:%M") == "10:05"
 
 
+def test_call_close80_range_invalid_combina_salidas_y_gana_la_primera():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb150950CallClose80Tp125Stop15RangeInvalid,
+    )
+
+    strategy = SpyOrb150950CallClose80Tp125Stop15RangeInvalid()
+    bars = _ohlcv({
+        **{hhmm: (100.0, 100.0, 100.0, 100.0, 1000)
+           for hhmm in _flat_range()},
+        "10:01": (101.0, 101.0, 99.9, 100.0, 1000),
+    })
+    path = pd.DataFrame(
+        [{"bid": 1.20}, {"bid": 0.90}],
+        index=pd.DatetimeIndex([
+            pd.Timestamp(datetime(2026, 7, 15, 10, 0, tzinfo=NY)),
+            pd.Timestamp(datetime(2026, 7, 15, 10, 5, tzinfo=NY)),
+        ]).tz_convert("UTC"),
+    )
+    provider = FakeProvider(bars, {"path": path})
+    ctx = ScanContext(provider, "SPY", SESSION,
+                      datetime(2026, 7, 15, 10, 6, tzinfo=NY), bars)
+    alert = type("AlertStub", (), {
+        "entry_ts": datetime(2026, 7, 15, 10, 0, tzinfo=NY),
+        "entry_ask": Decimal("1.10"),
+        "occ_symbol": "SPY   260715C00100000",
+        "meta": {"range_low": 99.5, "range_high": 100.5},
+    })()
+
+    decision = strategy.check_exit(ctx, alert)
+
+    assert decision.should_exit
+    assert decision.reason == "range_invalidation"
+    assert decision.at.astimezone(NY).strftime("%H:%M") == "10:02"
+
+
+def test_call_close80_range_invalid_respeta_stop_si_ocurre_primero():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb150950CallClose80Tp125Stop15RangeInvalid,
+    )
+
+    strategy = SpyOrb150950CallClose80Tp125Stop15RangeInvalid()
+    bars = _ohlcv({
+        **{hhmm: (100.0, 100.0, 100.0, 100.0, 1000)
+           for hhmm in _flat_range()},
+        "10:05": (101.0, 101.0, 99.9, 100.0, 1000),
+    })
+    path = pd.DataFrame(
+        [{"bid": 0.90}],
+        index=pd.DatetimeIndex([
+            pd.Timestamp(datetime(2026, 7, 15, 10, 1, tzinfo=NY)),
+        ]).tz_convert("UTC"),
+    )
+    provider = FakeProvider(bars, {"path": path})
+    ctx = ScanContext(provider, "SPY", SESSION,
+                      datetime(2026, 7, 15, 10, 6, tzinfo=NY), bars)
+    alert = type("AlertStub", (), {
+        "entry_ts": datetime(2026, 7, 15, 10, 0, tzinfo=NY),
+        "entry_ask": Decimal("1.10"),
+        "occ_symbol": "SPY   260715C00100000",
+        "meta": {"range_low": 99.5, "range_high": 100.5},
+    })()
+
+    decision = strategy.check_exit(ctx, alert)
+
+    assert decision.should_exit
+    assert decision.reason == "option_stop"
+    assert decision.at.astimezone(NY).strftime("%H:%M") == "10:01"
+
+
 def test_orb5_entra_en_la_tercera_vela_si_rompe_con_volumen():
     from powerTradeAi_djangoApp.strategies.orb15 import (
         SpyOrb5ValidateSecondEnterThirdVolumeStop15,
