@@ -91,6 +91,8 @@ def replay_action(request):
     date_str = request.POST.get("date", "")
     if not date_str:
         return JsonResponse({"error": "Fecha requerida"}, status=400)
+    save = request.POST.get("save", "").lower() in {"1", "true", "yes", "on"}
+    overwrite = request.POST.get("overwrite", "").lower() in {"1", "true", "yes", "on"}
 
     try:
         day = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -104,7 +106,7 @@ def replay_action(request):
         return JsonResponse({"error": f"{day} no es dia habil"}, status=400)
 
     try:
-        result = replay_day(day, persist=False)
+        result = replay_day(day, persist=save, overwrite=overwrite if save else False)
     except Exception as exc:
         log.exception("replay desde dashboard fallo")
         return JsonResponse({"error": str(exc)}, status=500)
@@ -125,6 +127,8 @@ def replay_action(request):
 
     return JsonResponse({
         "day": str(day),
+        "saved": save,
+        "overwritten": overwrite if save else False,
         "alerts": alerts_data,
         "total": len(result.alerts),
         "closed": len(result.closed),

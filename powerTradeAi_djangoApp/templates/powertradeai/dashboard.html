@@ -293,6 +293,13 @@ header h1 span {
   width: 100%;
 }
 
+.replay-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 /* ---- Table ---- */
 .table-wrap {
   background: var(--surface);
@@ -414,6 +421,21 @@ tbody tr:hover { background: var(--bg); }
     <div class="scanner-empty">Pulsa &laquo;Escanear&raquo; para calcular.</div>
   </div>
 </div>
+
+<!-- Replay -->
+<form class="replay-panel" id="replay-form" onsubmit="return false;">
+  {% csrf_token %}
+  <div class="filter-group">
+    <label>Replay</label>
+    <input type="date" id="replay-date" name="date" value="{{ filters.hasta|default:filters.desde }}">
+  </div>
+  <div class="replay-actions">
+    <button type="button" class="btn btn-ghost" id="replay-calc-btn" onclick="runReplay(false)">Calcular</button>
+    <button type="button" class="btn btn-primary" id="replay-save-btn" onclick="runReplay(true)">Guardar en tabla</button>
+  </div>
+  <span class="replay-status" id="replay-status"></span>
+  <div class="replay-result" id="replay-result"></div>
+</form>
 
 <!-- Stats -->
 <div class="stats">
@@ -645,6 +667,68 @@ async function loadScanner() {
     status.textContent = '';
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function runReplay(save) {
+  const dateInput = document.getElementById('replay-date');
+  const status = document.getElementById('replay-status');
+  const resultBox = document.getElementById('replay-result');
+  const calcBtn = document.getElementById('replay-calc-btn');
+  const saveBtn = document.getElementById('replay-save-btn');
+  const date = dateInput.value;
+  if (!date) {
+    status.textContent = 'Elige una fecha.';
+    return;
+  }
+
+  calcBtn.disabled = true;
+  saveBtn.disabled = true;
+  status.textContent = save ? 'Guardando replay...' : 'Calculando replay...';
+  resultBox.classList.remove('visible');
+  resultBox.innerHTML = '';
+
+  const body = new URLSearchParams();
+  body.set('date', date);
+  if (save) {
+    body.set('save', '1');
+    body.set('overwrite', '1');
+  }
+
+  try {
+    const resp = await fetch("{% url 'powertradeai:replay_action' %}", {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+      },
+      body,
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Replay fallo');
+
+    const dashboardUrl = "{% url 'powertradeai:dashboard' %}" +
+      `?source=replay&desde=${encodeURIComponent(data.day)}&hasta=${encodeURIComponent(data.day)}`;
+    status.textContent = `${data.day} · ${data.total} alerta(s) · neto $${data.net}`;
+
+    const rows = data.alerts.map(a =>
+      `<tr><td>${escapeHtml(a.strategy)}</td><td>${escapeHtml(a.direction)}</td>` +
+      `<td class="right">${escapeHtml(a.strike)}</td><td class="right">${escapeHtml(a.entry)}</td>` +
+      `<td class="right">${escapeHtml(a.exit ?? '')}</td><td>${escapeHtml(a.reason ?? '')}</td>` +
+      `<td class="right">${escapeHtml(a.net ?? '')}</td><td class="right">${escapeHtml(a.pct ?? '')}</td></tr>`
+    ).join('');
+    resultBox.innerHTML =
+      `${save ? `<p><a href="${dashboardUrl}">Ver alertas guardadas en la tabla</a></p>` : ''}` +
+      '<table><thead><tr><th>Regla</th><th>Dir</th><th class="right">Strike</th>' +
+      '<th class="right">Compra</th><th class="right">Venta</th><th>Salida</th>' +
+      '<th class="right">Neto $</th><th class="right">Neto %</th></tr></thead>' +
+      `<tbody>${rows || '<tr><td colspan="8" class="empty-state">No salto ninguna regla</td></tr>'}</tbody></table>`;
+    resultBox.classList.add('visible');
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    calcBtn.disabled = false;
+    saveBtn.disabled = false;
   }
 }
 

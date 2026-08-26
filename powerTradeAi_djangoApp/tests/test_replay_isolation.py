@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -237,7 +238,33 @@ def test_dashboard_replay_es_solo_calculo(monkeypatch):
     response = dashboard.replay_action(request)
 
     assert response.status_code == 200
-    assert captured == {"persist": False}
+    assert captured == {"persist": False, "overwrite": False}
+
+
+def test_dashboard_replay_puede_guardar_en_tabla(monkeypatch):
+    from django.test import RequestFactory
+
+    from powerTradeAi_djangoApp import dashboard
+    from powerTradeAi_djangoApp.engine import replay
+
+    captured = {}
+
+    def calculate(day, **kwargs):
+        captured.update(kwargs)
+        return replay.ReplayResult(day=day)
+
+    monkeypatch.setattr(replay, "replay_day", calculate)
+    request = RequestFactory().post(
+        "/replay/", {"date": "2026-07-17", "save": "1", "overwrite": "1"})
+    request.user = SimpleNamespace(is_active=True, is_staff=True)
+
+    response = dashboard.replay_action(request)
+
+    assert response.status_code == 200
+    assert captured == {"persist": True, "overwrite": True}
+    payload = json.loads(response.content)
+    assert payload["saved"] is True
+    assert payload["overwritten"] is True
 
 
 # --- API ----------------------------------------------------------------
