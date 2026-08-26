@@ -186,6 +186,7 @@ button:disabled { opacity: .55; cursor: default; }
       <label>Fecha</label>
       <input type="date" id="date">
     </div>
+    {% csrf_token %}
     <div class="field">
       <label>Símbolo</label>
       <select id="symbol">
@@ -206,6 +207,7 @@ button:disabled { opacity: .55; cursor: default; }
       </select>
     </div>
     <button id="load-btn">Cargar día</button>
+    <button id="save-btn" class="secondary">Guardar alertas</button>
     <button id="play-btn" class="secondary" disabled>Play</button>
     <div class="status" id="status"></div>
   </div>
@@ -344,6 +346,42 @@ async function loadReplay() {
     status.textContent = 'Error: ' + err.message;
   } finally {
     document.getElementById('loading').style.display = 'none';
+  }
+}
+async function saveReplayAlerts() {
+  const date = document.getElementById('date').value;
+  const status = document.getElementById('status');
+  const btn = document.getElementById('save-btn');
+  if (!date) { status.textContent = 'Selecciona una fecha.'; return; }
+
+  btn.disabled = true;
+  status.textContent = 'Guardando alertas replay...';
+
+  const body = new URLSearchParams();
+  body.set('date', date);
+  body.set('save', '1');
+  body.set('overwrite', '1');
+
+  try {
+    const resp = await fetch("{% url 'powertradeai:replay_action' %}", {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+      },
+      body,
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    const dashboardUrl = "{% url 'powertradeai:dashboard' %}" +
+      `?source=replay&desde=${encodeURIComponent(data.day)}&hasta=${encodeURIComponent(data.day)}`;
+    status.innerHTML =
+      `${escapeHtml(data.day)} · ${escapeHtml(data.total)} alerta(s) guardada(s) · ` +
+      `<a href="${dashboardUrl}">ver en tabla</a>`;
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 function drawTrendlines(currentTime = null) {
@@ -601,6 +639,7 @@ function stop() {
 
 document.getElementById('symbol').addEventListener('change', filterStrategyOptions);
 document.getElementById('load-btn').addEventListener('click', loadReplay);
+document.getElementById('save-btn').addEventListener('click', saveReplayAlerts);
 document.getElementById('play-btn').addEventListener('click', play);
 document.getElementById('step-btn').addEventListener('click', step);
 document.getElementById('scrubber').addEventListener('input', e => {
