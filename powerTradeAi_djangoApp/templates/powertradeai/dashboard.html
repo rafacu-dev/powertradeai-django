@@ -175,13 +175,18 @@ header h1 span {
 .dot-price.green { background: var(--green); }
 .dot-price.red { background: var(--red); }
 .scanner td.tv-cell { text-align: center; }
-.live-rule-form { padding: 16px; }
-.live-rule-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:8px; margin-bottom:14px; }
-.live-rule { display:flex; gap:10px; align-items:flex-start; padding:10px; border:1px solid var(--border); border-radius:var(--radius); cursor:pointer; }
-.live-rule:has(input:checked) { border-color:var(--accent); background:var(--green-bg); }
-.live-rule input { margin-top:3px; accent-color:var(--accent); }
-.live-rule strong, .live-rule small { display:block; }
-.live-rule small { color:var(--text-3); margin-top:2px; }
+.live-rule-form { padding: 0 16px 16px; }
+.live-rule-details { border-top: 1px solid var(--border); }
+.live-rule-details summary { cursor:pointer; padding:14px 16px; color:var(--accent); font-weight:700; list-style-position: inside; }
+.live-rule-details summary::marker { color:var(--accent); }
+.live-rule-table { width:100%; border-collapse:collapse; font-size:13px; margin-bottom:14px; }
+.live-rule-table th, .live-rule-table td { padding:10px 12px; border-bottom:1px solid var(--border); text-align:left; }
+.live-rule-table th { color:var(--text-3); font-size:11px; text-transform:uppercase; }
+.live-rule-table td:last-child, .live-rule-table th:last-child { text-align:center; width:90px; }
+.live-rule-table .rule-id { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--text-2); }
+.live-rule-table .rule-name { color:var(--text-3); }
+.live-rule-table input { width:20px; height:20px; accent-color:var(--accent); vertical-align:middle; }
+@media (max-width: 700px) { .live-rule-table { min-width:620px; } .live-rule-scroll { overflow-x:auto; } }
 .tv-link {
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--text-3); transition: color 0.15s;
@@ -438,15 +443,18 @@ tbody tr:hover { background: var(--bg); }
   <form method="post" action="{% url 'powertradeai:strategies_control' %}" class="live-rule-form">
     {% csrf_token %}
     {% for strategy in replay_strategies %}<input type="hidden" name="replay" value="{{ strategy.pk }}">{% endfor %}
-    <div class="live-rule-grid">
-      {% for strategy in strategies %}
-      <label class="live-rule {% if strategy.enabled %}selected{% endif %}">
-        <input type="checkbox" name="live" value="{{ strategy.pk }}" {% if strategy.enabled %}checked{% endif %}>
-        <span><strong>{{ strategy.strategy_id }}</strong><small>{{ strategy.symbol }} · {{ strategy.name }}</small></span>
-      </label>
-      {% empty %}<span class="scanner-empty">No hay reglas sembradas.</span>{% endfor %}
-    </div>
-    <button class="btn" type="submit">Guardar reglas live</button>
+    <details class="live-rule-details">
+      <summary>Mostrar reglas configurables</summary>
+      <div class="live-rule-scroll"><table class="live-rule-table">
+        <thead><tr><th>Simbolo</th><th>Regla</th><th>Descripcion</th><th>Live</th></tr></thead>
+        <tbody>
+          {% for strategy in strategies %}
+          <tr><td>{{ strategy.symbol }}</td><td class="rule-id">{{ strategy.strategy_id }}</td><td class="rule-name">{{ strategy.name }}</td><td><input type="checkbox" name="live" value="{{ strategy.pk }}" {% if strategy.enabled %}checked{% endif %} aria-label="Evaluar {{ strategy.strategy_id }} en live"></td></tr>
+          {% empty %}<tr><td colspan="4" class="scanner-empty">No hay reglas sembradas.</td></tr>{% endfor %}
+        </tbody>
+      </table></div>
+      <button class="btn" type="submit">Guardar reglas live</button>
+    </details>
   </form>
 </div>
 
