@@ -42,16 +42,31 @@ from django.core.management.base import BaseCommand
 from ...models import Strategy
 from ...strategies import all_strategies
 
-# Reglas autorizadas a operar en paper money. VACIA A PROPOSITO.
+# Reglas autorizadas a operar en paper money.
 #
 # Formato: ("SPY_ORB15_0950_RANGE_INVALID", "07-ago-2026: motivo"),
-#
-# Ninguna candidata actual cumple el listón. El estado de la mas avanzada,
-# SPY ORB-15, esta en LocalQuantAI/estrategias/SPY_ORB/README.md: el orden
-# entre variantes es robusto, pero la magnitud va de +$1.66 a +$17.36 por
-# operacion segun donde se corte la muestra y ninguna ventana tiene mediana
-# positiva. Eso no basta para dimensionar, asi que tampoco para operar.
-APTAS_PARA_PAPER: tuple[tuple[str, str], ...] = ()
+APTAS_PARA_PAPER: tuple[tuple[str, str], ...] = (
+    (
+        "SPY_ORB15_BASE_CALL_CLOSE80_TP125_STOP15",
+        "26-ago-2026: mejor resultado del grid ORB; validar fills en paper",
+    ),
+    (
+        "SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15",
+        "26-ago-2026: candidato ORB conservador con filtro horario robusto",
+    ),
+    (
+        "SPY_ORB15_0950_PUT_BODY70_TP100_STOP15",
+        "26-ago-2026: candidato secundario PUT por cuerpo de ruptura",
+    ),
+    (
+        "SPY_ORB15_0950_RANGE_INVALID_STOP15",
+        "26-ago-2026: benchmark ORB-15 close90 + stop 15 para comparar paper",
+    ),
+    (
+        "SPY_ORB5_VALIDATE_2ND_ENTER_3RD_VOL15_STOP15",
+        "26-ago-2026: ORB-5 volumen 1.5x en shadow/paper para validar muestra",
+    ),
+)
 
 _APTAS_IDS = frozenset(strategy_id for strategy_id, _ in APTAS_PARA_PAPER)
 

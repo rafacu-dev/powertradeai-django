@@ -37,6 +37,18 @@ def _flat_range(level: float = 100.0) -> dict[str, float]:
     return {f"09:{30 + i}": level for i in range(15)}
 
 
+def _ohlcv(rows: dict[str, tuple[float, float, float, float, int]]) -> pd.DataFrame:
+    """rows: {"09:30": (open, high, low, close, volume)} en hora ET."""
+    index, data = [], []
+    for hhmm, row in rows.items():
+        hh, mm = (int(x) for x in hhmm.split(":"))
+        index.append(pd.Timestamp(
+            datetime(SESSION.year, SESSION.month, SESSION.day, hh, mm, tzinfo=NY)))
+        o, h, l, c, v = row
+        data.append({"open": o, "high": h, "low": l, "close": c, "volume": v})
+    return pd.DataFrame(data, index=pd.DatetimeIndex(index).tz_convert("UTC"))
+
+
 class FakeProvider:
     """Devuelve las velas que le des y una quote fija."""
 
@@ -52,6 +64,9 @@ class FakeProvider:
 
     def option_quote(self, occ, at=None):
         return self._quotes.get("at_exit" if at else "at_entry", self.default_quote)
+
+    def option_quotes(self, occ, start, end, interval="1s"):
+        return self._quotes.get("path", pd.DataFrame())
 
     def latest_price(self, symbol):
         return 100.0
@@ -114,6 +129,209 @@ def test_la_variante_0950_ignora_un_quiebre_de_las_0945():
                       datetime(2026, 7, 15, 9, 46, tzinfo=NY), bars)
     assert SpyOrb150950().evaluate(ctx) is None
     assert Orb15Base().evaluate(ctx) is not None
+
+
+def test_stop15_exige_cierre_fuerte_de_la_vela_de_ruptura():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb150950, SpyOrb150950RangeInvalidStop15,
+    )
+
+    rows = {
+        **{hhmm: (100.0, 100.0, 100.0, 100.0, 1000)
+           for hhmm in _flat_range()},
+        # Rompe por arriba, pero cierra cerca de la parte baja de la vela:
+        # close_pos = (100.04 - 99.90) / (101.00 - 99.90) = 0.127.
+        "09:50": (100.0, 101.0, 99.9, 100.04, 2000),
+    }
+    bars = _ohlcv(rows)
+    ctx = ScanContext(FakeProvider(bars), "SPY", SESSION,
+                      datetime(2026, 7, 15, 9, 51, tzinfo=NY), bars)
+
+    assert SpyOrb150950().evaluate(ctx) is not None
+    assert SpyOrb150950RangeInvalidStop15().evaluate(ctx) is None
+
+
+def test_stop15_acepta_ruptura_con_cierre_en_el_extremo_direccional():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb150950RangeInvalidStop15,
+    )
+
+    rows = {
+        **{hhmm: (100.0, 100.0, 100.0, 100.0, 1000)
+           for hhmm in _flat_range()},
+        # close_pos = (100.95 - 99.90) / (101.00 - 99.90) = 0.954.
+        "09:50": (100.0, 101.0, 99.9, 100.95, 2000),
+    }
+    bars = _ohlcv(rows)
+    ctx = ScanContext(FakeProvider(bars), "SPY", SESSION,
+                      datetime(2026, 7, 15, 9, 51, tzinfo=NY), bars)
+
+    signal = SpyOrb150950RangeInvalidStop15().evaluate(ctx)
+    assert signal is not None
+    assert signal.direction == "CALL"
+    assert signal.meta["breakout_close_pos"] >= 0.9
+
+
+def test_base_call_close80_solo_acepta_call_con_cierre_fuerte():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb15BaseCallClose80Tp125Stop15,
+    )
+
+    rows = {
+        **{hhmm: (100.0, 100.0, 100.0, 100.0, 1000)
+           for hhmm in _flat_range()},
+        # CALL con close_pos = 0.875.
+        "09:45": (100.0, 100.9, 99.7, 100.75, 2000),
+    }
+    bars = _ohlcv(rows)
+    ctx = ScanContext(FakeProvider(bars), "SPY", SESSION,
+                      datetime(2026, 7, 15, 9, 46, tzinfo=NY), bars)
+
+    signal = SpyOrb15BaseCallClose80Tp125Stop15().evaluate(ctx)
+    assert signal is not None
+    assert signal.direction == "CALL"
+    assert signal.meta["allowed_direction"] == "CALL"
+    assert signal.meta["breakout_close_pos"] >= 0.8
+
+
+def test_base_call_close80_rechaza_put_aunque_rompa_fuerte():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb15BaseCallClose80Tp125Stop15,
+    )
+
+    rows = {
+        **{hhmm: (100.0, 100.0, 100.0, 100.0, 1000)
+           for hhmm in _flat_range()},
+        "09:45": (100.0, 100.2, 98.8, 98.9, 2000),
+    }
+    bars = _ohlcv(rows)
+    ctx = ScanContext(FakeProvider(bars), "SPY", SESSION,
+                      datetime(2026, 7, 15, 9, 46, tzinfo=NY), bars)
+
+    assert SpyOrb15BaseCallClose80Tp125Stop15().evaluate(ctx) is None
+
+
+def test_0950_put_body70_exige_put_y_cuerpo_grande():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb150950PutBody70Tp100Stop15,
+    )
+
+    rows = {
+        **{hhmm: (100.0, 100.0, 100.0, 100.0, 1000)
+           for hhmm in _flat_range()},
+        # PUT, body_frac = abs(100.0 - 98.9) / (100.2 - 98.8) = 0.786.
+        "09:50": (100.0, 100.2, 98.8, 98.9, 2000),
+    }
+    bars = _ohlcv(rows)
+    ctx = ScanContext(FakeProvider(bars), "SPY", SESSION,
+                      datetime(2026, 7, 15, 9, 51, tzinfo=NY), bars)
+
+    signal = SpyOrb150950PutBody70Tp100Stop15().evaluate(ctx)
+    assert signal is not None
+    assert signal.direction == "PUT"
+    assert signal.meta["breakout_body_frac"] >= 0.7
+
+
+def test_0950_put_body70_rechaza_cuerpo_pequeno():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb150950PutBody70Tp100Stop15,
+    )
+
+    rows = {
+        **{hhmm: (100.0, 100.0, 100.0, 100.0, 1000)
+           for hhmm in _flat_range()},
+        # Rompe como PUT, pero body_frac bajo: 0.1 / 1.4.
+        "09:50": (99.0, 100.2, 98.8, 98.9, 2000),
+    }
+    bars = _ohlcv(rows)
+    ctx = ScanContext(FakeProvider(bars), "SPY", SESSION,
+                      datetime(2026, 7, 15, 9, 51, tzinfo=NY), bars)
+
+    assert SpyOrb150950PutBody70Tp100Stop15().evaluate(ctx) is None
+
+
+def test_take_profit_de_prima_cierra_antes_que_el_reloj():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb150950CallClose80Tp125Stop15,
+    )
+
+    strategy = SpyOrb150950CallClose80Tp125Stop15()
+    path = pd.DataFrame(
+        [{"bid": 1.20}, {"bid": 2.48}],
+        index=pd.DatetimeIndex([
+            pd.Timestamp(datetime(2026, 7, 15, 10, 0, tzinfo=NY)),
+            pd.Timestamp(datetime(2026, 7, 15, 10, 5, tzinfo=NY)),
+        ]).tz_convert("UTC"),
+    )
+    provider = FakeProvider(_bars(_flat_range()), {"path": path})
+    ctx = ScanContext(provider, "SPY", SESSION,
+                      datetime(2026, 7, 15, 10, 6, tzinfo=NY),
+                      provider.bars_1m("SPY", SESSION))
+    alert = type("AlertStub", (), {
+        "entry_ts": datetime(2026, 7, 15, 10, 0, tzinfo=NY),
+        "entry_ask": Decimal("1.10"),
+        "occ_symbol": "SPY   260715C00100000",
+    })()
+
+    decision = strategy.check_exit(ctx, alert)
+    assert decision.should_exit
+    assert decision.reason == "option_take_profit"
+    assert decision.at.astimezone(NY).strftime("%H:%M") == "10:05"
+
+
+def test_orb5_entra_en_la_tercera_vela_si_rompe_con_volumen():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb5ValidateSecondEnterThirdVolumeStop15,
+    )
+
+    rows = {
+        "09:30": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:31": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:32": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:33": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:34": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:35": (100.0, 100.2, 99.9, 100.1, 1600),
+        "09:36": (100.1, 100.3, 100.0, 100.2, 1600),
+        "09:37": (100.2, 100.4, 100.1, 100.3, 1600),
+        "09:38": (100.3, 100.5, 100.2, 100.4, 1600),
+        "09:39": (100.4, 100.6, 100.3, 100.5, 1600),
+        "09:40": (100.55, 100.7, 100.5, 100.65, 1000),
+    }
+    bars = _ohlcv(rows)
+    ctx = ScanContext(FakeProvider(bars), "SPY", SESSION,
+                      datetime(2026, 7, 15, 9, 40, tzinfo=NY), bars)
+
+    signal = SpyOrb5ValidateSecondEnterThirdVolumeStop15().evaluate(ctx)
+    assert signal is not None
+    assert signal.direction == "CALL"
+    assert signal.signal_ts.astimezone(NY).strftime("%H:%M") == "09:40"
+    assert signal.underlying == 100.55
+    assert signal.meta["validation_volume_ratio"] == 1.6
+
+
+def test_orb5_rechaza_ruptura_sin_volumen_relativo():
+    from powerTradeAi_djangoApp.strategies.orb15 import (
+        SpyOrb5ValidateSecondEnterThirdVolumeStop15,
+    )
+
+    rows = {
+        "09:30": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:31": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:32": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:33": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:34": (100.0, 100.1, 99.9, 100.0, 1000),
+        "09:35": (100.0, 100.2, 99.9, 100.1, 1000),
+        "09:36": (100.1, 100.3, 100.0, 100.2, 1000),
+        "09:37": (100.2, 100.4, 100.1, 100.3, 1000),
+        "09:38": (100.3, 100.5, 100.2, 100.4, 1000),
+        "09:39": (100.4, 100.6, 100.3, 100.5, 1000),
+        "09:40": (100.55, 100.7, 100.5, 100.65, 1000),
+    }
+    bars = _ohlcv(rows)
+    ctx = ScanContext(FakeProvider(bars), "SPY", SESSION,
+                      datetime(2026, 7, 15, 9, 40, tzinfo=NY), bars)
+
+    assert SpyOrb5ValidateSecondEnterThirdVolumeStop15().evaluate(ctx) is None
 
 
 # --- Ciclo completo contra la base de datos -----------------------------

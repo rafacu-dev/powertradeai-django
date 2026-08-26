@@ -444,20 +444,21 @@ def test_seed_solo_habilita_las_de_la_lista_explicita():
         strategy_id="REGLA_HUERFANA", enabled=True).exists()
 
 
-def test_seed_no_deja_activa_ninguna_regla_hoy():
-    """Estado declarado el 07-ago-2026: la aplicacion no opera nada.
-
-    Este test es el que hay que cambiar a proposito al promover la primera
-    regla. Sirve para que anadir una a APTAS_PARA_PAPER sea una decision
-    visible y no un descuido.
-    """
+def test_seed_deja_activas_solo_las_orb_promovidas_a_paper():
+    """Promocion 26-ago-2026: solo las ORB candidatas operan en paper."""
     from django.core.management import call_command
 
+    from powerTradeAi_djangoApp.management.commands.seed_strategies import (
+        APTAS_PARA_PAPER,
+    )
     from powerTradeAi_djangoApp.models import Strategy
 
     call_command("seed_strategies", stdout=StringIO())
-    assert Strategy.objects.filter(enabled=True).count() == 0
-    # El catalogo se conserva entero: no operar no es borrar.
+    enabled = set(Strategy.objects.filter(enabled=True).values_list(
+        "strategy_id", flat=True))
+    assert enabled == {strategy_id for strategy_id, _ in APTAS_PARA_PAPER}
+    assert len(enabled) == 5
+    # El catalogo se conserva entero: apagar no es borrar.
     assert Strategy.objects.count() > 100
 
 

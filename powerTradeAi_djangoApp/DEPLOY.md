@@ -183,9 +183,19 @@ from powerTradeAi_djangoApp.models import Strategy; \
 print(list(Strategy.objects.filter(enabled=True).values_list('strategy_id', flat=True)))"
 ```
 
-Hoy debe imprimir una lista **vacia**. Con cero reglas activas el scanner sigue
-corriendo y registrando `ScanRun` cada pasada, pero `strategies_evaluated` sera
-0 y no se creara ninguna alerta. Ese es el estado esperado, no un fallo.
+Debe imprimir solo las reglas explicitamente autorizadas en
+`APTAS_PARA_PAPER`. Para la promocion ORB del 26-ago-2026 son:
+
+```text
+SPY_ORB15_BASE_CALL_CLOSE80_TP125_STOP15
+SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15
+SPY_ORB15_0950_PUT_BODY70_TP100_STOP15
+SPY_ORB15_0950_RANGE_INVALID_STOP15
+SPY_ORB5_VALIDATE_2ND_ENTER_3RD_VOL15_STOP15
+```
+
+Si la lista sale vacia, el scanner sigue corriendo y registrando `ScanRun` cada
+pasada, pero `strategies_evaluated` sera 0 y no se creara ninguna alerta.
 
 ## 6. API keys con menor privilegio
 

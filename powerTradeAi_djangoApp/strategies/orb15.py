@@ -1,4 +1,4 @@
-"""Familia SPY ORB-15.
+"""Familia SPY ORB.
 
 Regla base: el rango son las 15 velas de 1m de 09:30 a 09:44 ET. Se vigila el
 quiebre a partir de una hora de arranque; el cierre de una vela por encima de
@@ -28,6 +28,12 @@ RANGE_BARS = 15       # 09:30..09:44, sin rellenar minutos ausentes
 STRIKE_DEPTH = 8      # niveles ITM que busca el replay causal
 STOP_PCT = 15.0       # % de caida del BID vs ASK de entrada que dispara el stop
 STOP_LEAD_SECONDS = 1.0   # el tick de entrada no cuenta como stop (spread inicial)
+STRONG_CLOSE_POS = 0.90
+PAPER_CLOSE_POS = 0.80
+PAPER_BODY_FRAC = 0.70
+PAPER_TP_CALL = 125.0
+PAPER_TP_PUT = 100.0
+ORB5_VOLUME_RATIO = 1.50
 
 
 def _utc(ts) -> pd.Timestamp:
@@ -51,6 +57,11 @@ class Orb15Base(BaseStrategy):
         # guarda, un scanner reiniciado a media sesion compraria un quiebre de
         # hace 40 minutos al precio actual.
         "max_signal_age_seconds": 90,
+        # None conserva la regla historica. Las variantes nuevas pueden exigir
+        # que la vela de ruptura cierre cerca de su extremo direccional.
+        "min_breakout_close_pos": None,
+        "min_breakout_body_frac": None,
+        "allowed_direction": None,
     }
 
     # --- Rango ----------------------------------------------------------
@@ -98,13 +109,23 @@ class Orb15Base(BaseStrategy):
         ]
 
         for ts, bar in window.iterrows():
-            close = float(bar["close"])
-            if close > high * (1 + buf):
-                direction = "CALL"
-            elif close < low * (1 - buf):
-                direction = "PUT"
-            else:
+            direction = self._breakout_direction(bar, low, high, buf)
+            if direction is None:
                 continue
+            allowed_direction = self.params.get("allowed_direction")
+            if allowed_direction is not None and direction != allowed_direction:
+                continue
+            close_pos = self._directional_close_pos(bar, direction)
+            minimum_close_pos = self.params.get("min_breakout_close_pos")
+            if (minimum_close_pos is not None
+                    and close_pos < float(minimum_close_pos)):
+                continue
+            body_frac = self._body_frac(bar)
+            minimum_body_frac = self.params.get("min_breakout_body_frac")
+            if (minimum_body_frac is not None
+                    and body_frac < float(minimum_body_frac)):
+                continue
+            close = float(bar["close"])
             # El cierre de la vela que inicia en ts ocurre un minuto despues.
             signal_ts = ts + pd.Timedelta(minutes=1)
             age = (pd.Timestamp(ctx.now) - signal_ts).total_seconds()
@@ -124,9 +145,42 @@ class Orb15Base(BaseStrategy):
                     "signal_bar_ts": ts.isoformat(),
                     "buffer": buf,
                     "watch_from": watch_from,
+                    "breakout_close_pos": round(close_pos, 4),
+                    "breakout_body_frac": round(body_frac, 4),
+                    "min_breakout_close_pos": minimum_close_pos,
+                    "min_breakout_body_frac": minimum_body_frac,
+                    "allowed_direction": allowed_direction,
                 },
             )
         return None
+
+    def _breakout_direction(self, bar, low: float, high: float,
+                            buffer: float) -> str | None:
+        close = float(bar["close"])
+        if close > high * (1 + buffer):
+            return "CALL"
+        if close < low * (1 - buffer):
+            return "PUT"
+        return None
+
+    def _directional_close_pos(self, bar, direction: str) -> float:
+        high = float(bar["high"])
+        low = float(bar["low"])
+        close = float(bar["close"])
+        rng = high - low
+        if rng <= 0:
+            return 1.0
+        if direction == "CALL":
+            return (close - low) / rng
+        return (high - close) / rng
+
+    def _body_frac(self, bar) -> float:
+        high = float(bar["high"])
+        low = float(bar["low"])
+        rng = high - low
+        if rng <= 0:
+            return 1.0
+        return abs(float(bar["close"]) - float(bar["open"])) / rng
 
     # --- Contrato -------------------------------------------------------
 
@@ -245,12 +299,13 @@ class SpyOrb150950RangeInvalidStop15(SpyOrb150950RangeInvalid):
     """
 
     strategy_id = "SPY_ORB15_0950_RANGE_INVALID_STOP15"
-    name = "SPY ORB-15 9:50 + invalidacion + stop 15% prima"
-    rule_version = "orb15_0950_range_invalid_stop15_causal_v1"
+    name = "SPY ORB-15 9:50 + invalidacion + stop 15% prima + cierre fuerte"
+    rule_version = "orb15_0950_range_invalid_stop15_close90_causal_v2"
     default_params = {
         **SpyOrb150950RangeInvalid.default_params,
         "option_stop_pct": STOP_PCT,
         "option_stop_lead_seconds": STOP_LEAD_SECONDS,
+        "min_breakout_close_pos": STRONG_CLOSE_POS,
     }
 
     def check_exit(self, ctx: ScanContext, alert) -> ExitDecision:
@@ -310,3 +365,223 @@ class SpyOrb150950RangeInvalidStop15(SpyOrb150950RangeInvalid):
         return ExitDecision(
             should_exit=True, reason="option_stop",
             at=_utc(breach.index[0]).to_pydatetime())
+
+    def _option_take_profit_exit(self, ctx: ScanContext, alert) -> ExitDecision:
+        """Primer BID >= ask_entrada*(1 + take_profit%) tras la entrada."""
+        if alert.entry_ts is None or alert.entry_ask is None or not alert.occ_symbol:
+            return ExitDecision(should_exit=False)
+
+        take_profit_pct = self.params.get("option_take_profit_pct")
+        if take_profit_pct is None:
+            return ExitDecision(should_exit=False)
+        threshold = float(alert.entry_ask) * (1.0 + float(take_profit_pct) / 100.0)
+
+        entry_ts = _utc(alert.entry_ts)
+        start = entry_ts + pd.Timedelta(
+            seconds=float(self.params["option_stop_lead_seconds"]))
+        now = _utc(ctx.now)
+        if now < start:
+            return ExitDecision(should_exit=False)
+
+        try:
+            quotes = ctx.provider.option_quotes(
+                alert.occ_symbol, entry_ts.to_pydatetime(), now.to_pydatetime())
+        except Exception:
+            return ExitDecision(should_exit=False)
+        if quotes is None or quotes.empty:
+            return ExitDecision(should_exit=False)
+
+        window = quotes[quotes.index >= start]
+        if window.empty:
+            return ExitDecision(should_exit=False)
+        bids = pd.to_numeric(window["bid"], errors="coerce")
+        hit = window[bids >= threshold]
+        if hit.empty:
+            return ExitDecision(should_exit=False)
+        return ExitDecision(
+            should_exit=True, reason="option_take_profit",
+            at=_utc(hit.index[0]).to_pydatetime())
+
+
+class Orb15StopTargetMixin:
+    """Gestion por prima: stop y take profit; gana el evento mas temprano."""
+
+    def check_exit(self, ctx: ScanContext, alert) -> ExitDecision:
+        fired = [
+            d for d in (
+                SpyOrb150950RangeInvalidStop15._option_stop_exit(self, ctx, alert),
+                SpyOrb150950RangeInvalidStop15._option_take_profit_exit(
+                    self, ctx, alert),
+            )
+            if d.should_exit
+        ]
+        if not fired:
+            return ExitDecision(should_exit=False)
+        return min(fired, key=lambda d: (
+            _utc(d.at) if d.at is not None else _utc(ctx.now),
+            0 if d.reason == "option_stop" else 1,
+        ))
+
+
+@register
+class SpyOrb15BaseCallClose80Tp125Stop15(Orb15StopTargetMixin, SpyOrb15Base):
+    strategy_id = "SPY_ORB15_BASE_CALL_CLOSE80_TP125_STOP15"
+    name = "SPY ORB-15 base CALL cierre 80% + TP 125% + stop 15%"
+    rule_version = "orb15_base_call_close80_tp125_stop15_causal_v1"
+    default_params = {
+        **SpyOrb15Base.default_params,
+        "allowed_direction": "CALL",
+        "min_breakout_close_pos": PAPER_CLOSE_POS,
+        "hold_minutes": 390,
+        "flatten_at": "15:55",
+        "option_stop_pct": STOP_PCT,
+        "option_stop_lead_seconds": STOP_LEAD_SECONDS,
+        "option_take_profit_pct": PAPER_TP_CALL,
+    }
+
+
+@register
+class SpyOrb150950CallClose80Tp125Stop15(Orb15StopTargetMixin, SpyOrb150950):
+    strategy_id = "SPY_ORB15_0950_CALL_CLOSE80_TP125_STOP15"
+    name = "SPY ORB-15 9:50 CALL cierre 80% + TP 125% + stop 15%"
+    rule_version = "orb15_0950_call_close80_tp125_stop15_causal_v1"
+    default_params = {
+        **SpyOrb150950.default_params,
+        "allowed_direction": "CALL",
+        "min_breakout_close_pos": PAPER_CLOSE_POS,
+        "hold_minutes": 390,
+        "flatten_at": "15:55",
+        "option_stop_pct": STOP_PCT,
+        "option_stop_lead_seconds": STOP_LEAD_SECONDS,
+        "option_take_profit_pct": PAPER_TP_CALL,
+    }
+
+
+@register
+class SpyOrb150950PutBody70Tp100Stop15(Orb15StopTargetMixin, SpyOrb150950):
+    strategy_id = "SPY_ORB15_0950_PUT_BODY70_TP100_STOP15"
+    name = "SPY ORB-15 9:50 PUT cuerpo 70% + TP 100% + stop 15%"
+    rule_version = "orb15_0950_put_body70_tp100_stop15_causal_v1"
+    default_params = {
+        **SpyOrb150950.default_params,
+        "allowed_direction": "PUT",
+        "min_breakout_body_frac": PAPER_BODY_FRAC,
+        "hold_minutes": 390,
+        "flatten_at": "15:55",
+        "option_stop_pct": STOP_PCT,
+        "option_stop_lead_seconds": STOP_LEAD_SECONDS,
+        "option_take_profit_pct": PAPER_TP_PUT,
+    }
+
+
+@register
+class SpyOrb5ValidateSecondEnterThirdVolumeStop15(Orb15Base):
+    """ORB temprana dentro del primer bloque de 15m.
+
+    Rango 09:30-09:34, validacion 09:35-09:39 y entrada observable a las 09:40.
+    Solo opera si la segunda vela de 5m rompe el rango y su volumen es al menos
+    1.5x el volumen de la primera vela. La salida es operativa: stop de prima
+    15% o aplanado maximo a las 15:55.
+    """
+
+    strategy_id = "SPY_ORB5_VALIDATE_2ND_ENTER_3RD_VOL15_STOP15"
+    name = "SPY ORB-5 valida 2da vela + volumen 1.5x + stop 15% prima"
+    rule_version = "orb5_validate_second_enter_third_vol15_stop15_causal_v1"
+    default_params = {
+        **Orb15Base.default_params,
+        "range_minutes": 5,
+        "validation_minutes": 5,
+        "validation_volume_ratio_min": ORB5_VOLUME_RATIO,
+        "watch_from": "09:40",
+        "watch_until": "09:40",
+        "hold_minutes": 390,
+        "flatten_at": "15:55",
+        "option_stop_pct": STOP_PCT,
+        "option_stop_lead_seconds": STOP_LEAD_SECONDS,
+        "range_invalidation": False,
+    }
+
+    def evaluate(self, ctx: ScanContext) -> Signal | None:
+        now_et = pd.Timestamp(ctx.now).tz_convert(NY)
+        if now_et.time() != _t("09:40"):
+            return None
+
+        closed = ctx.causal_bars(1)
+        if closed.empty:
+            return None
+        local = closed.tz_convert(NY)
+        first = local[
+            (local.index.time >= _t("09:30"))
+            & (local.index.time <= _t("09:34"))
+        ]
+        second = local[
+            (local.index.time >= _t("09:35"))
+            & (local.index.time <= _t("09:39"))
+        ]
+        if len(first) < 5 or len(second) < 5:
+            return None
+
+        range_low = float(first["low"].min())
+        range_high = float(first["high"].max())
+        validation = {
+            "open": float(second["open"].iloc[0]),
+            "high": float(second["high"].max()),
+            "low": float(second["low"].min()),
+            "close": float(second["close"].iloc[-1]),
+            "volume": float(second["volume"].sum()),
+        }
+        first_volume = float(first["volume"].sum())
+        if first_volume <= 0:
+            return None
+        volume_ratio = validation["volume"] / first_volume
+        if volume_ratio < float(self.params["validation_volume_ratio_min"]):
+            return None
+
+        if validation["close"] > range_high:
+            direction = "CALL"
+        elif validation["close"] < range_low:
+            direction = "PUT"
+        else:
+            return None
+
+        # En replay la fila 09:40 ya existe en el frame completo. Solo se usa
+        # su OPEN: es observable al inicio de la tercera vela; high/low/close
+        # de esa vela seguirian siendo futuro y no se leen.
+        all_local = ctx.bars.tz_convert(NY)
+        entry_rows = all_local[all_local.index.time == _t("09:40")]
+        underlying = (
+            float(entry_rows["open"].iloc[0])
+            if not entry_rows.empty else validation["close"]
+        )
+        signal_ts = datetime.combine(
+            ctx.session_date, datetime.min.time(), tzinfo=NY).replace(
+                hour=9, minute=40)
+        return Signal(
+            direction=direction,
+            signal_ts=signal_ts,
+            underlying=underlying,
+            meta={
+                "range_high": range_high,
+                "range_low": range_low,
+                "range_bar_count": 5,
+                "validation_bar": "09:35-09:39",
+                "entry_bar": "09:40",
+                "validation_open": validation["open"],
+                "validation_high": validation["high"],
+                "validation_low": validation["low"],
+                "validation_close": validation["close"],
+                "validation_volume": validation["volume"],
+                "range_volume": first_volume,
+                "validation_volume_ratio": round(volume_ratio, 4),
+                "validation_volume_ratio_min": (
+                    self.params["validation_volume_ratio_min"]),
+                "watch_from": "09:40",
+            },
+        )
+
+    def scheduled_exit(self, entry_ts: datetime) -> datetime:
+        return datetime.combine(
+            entry_ts.astimezone(NY).date(), _t("15:55"), tzinfo=NY)
+
+    def check_exit(self, ctx: ScanContext, alert) -> ExitDecision:
+        return SpyOrb150950RangeInvalidStop15._option_stop_exit(self, ctx, alert)
