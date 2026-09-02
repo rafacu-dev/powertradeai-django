@@ -13,7 +13,7 @@ from decimal import Decimal
 from django.contrib.admin.views.decorators import staff_member_required
 from django.core.management import call_command
 from django.db.models import Avg, Count, Q, Sum
-from django.http import JsonResponse
+from django.http import JsonResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
@@ -24,6 +24,64 @@ log = logging.getLogger(__name__)
 REPLAY_DEFAULT_SYMBOLS = (
     "AMZN", "GOOGL", "TSLA", "AAPL", "NVDA", "MSFT", "QQQ", "SPY",
 )
+
+# Cuantos dias con actividad muestra la tira-calendario. No son dias naturales:
+# son sesiones con al menos una alerta, asi que los findes y festivos no dejan
+# huecos vacios.
+DIAS_EN_TIRA = 30
+
+
+def _tira_de_dias(qs, filtros_base, dia_seleccionado):
+    """Una columna por sesion, con el neto cerrado de ese dia.
+
+    ``qs`` llega filtrado por todo MENOS la fecha: si se acotara por
+    desde/hasta, pulsar un dia colapsaria la tira a ese unico dia y no habria
+    manera de volver a los demas.
+
+    El enlace de cada dia arrastra el resto de filtros vigentes. El del dia ya
+    activo los arrastra SIN fecha, de forma que volver a pulsarlo deselecciona.
+    """
+    filas = (
+        # El order_by() vacio es imprescindible: el queryset base ordena por
+        # signal_ts, y Django mete las columnas del ORDER BY en el GROUP BY.
+        # Sin limpiarlo saldria una fila por alerta en vez de una por dia.
+        qs.order_by()
+        .values("session_date")
+        .annotate(
+            neto=Sum("net_dollars", filter=Q(status=Alert.Status.CLOSED)),
+            operaciones=Count("id"),
+            pendientes=Count("id", filter=Q(status=Alert.Status.PENDING)),
+        )
+        .order_by("-session_date")[:DIAS_EN_TIRA]
+    )
+
+    dias = []
+    for fila in filas:
+        iso = fila["session_date"].isoformat()
+        activo = iso == dia_seleccionado
+        enlace = filtros_base.copy()
+        if not activo:
+            enlace["desde"] = iso
+            enlace["hasta"] = iso
+        neto = fila["neto"] if fila["neto"] is not None else Decimal("0.00")
+        dias.append({
+            "fecha": fila["session_date"],
+            "neto": neto,
+            # El signo va fuera del simbolo ("-$47,60", no "$-47,60"), y el
+            # valor absoluto lo formatea la plantilla para respetar la coma
+            # decimal del locale es-es, como el resto del dashboard.
+            "signo": "+" if neto > 0 else ("-" if neto < 0 else ""),
+            "neto_abs": abs(neto),
+            # Un dia con alertas pero ninguna cerrada no vale 0: no vale nada
+            # todavia. Se pinta distinto para no leerlo como jornada plana.
+            "sin_cerrar": fila["neto"] is None,
+            "operaciones": fila["operaciones"],
+            "pendientes": fila["pendientes"],
+            "activo": activo,
+            "url": "?" + enlace.urlencode(),
+        })
+    dias.reverse()  # cronologico: el dia mas reciente queda a la derecha
+    return dias
 
 
 @staff_member_required
@@ -47,6 +105,19 @@ def dashboard(request):
         qs = qs.filter(strategy__strategy_id=strategy_id)
     if direction:
         qs = qs.filter(direction=direction)
+
+    # Un dia esta "elegido" solo cuando el rango es exactamente ese dia. Un
+    # rango de varios dias deja la tira sin ninguna columna resaltada.
+    dia_seleccionado = desde if desde and desde == hasta else None
+    filtros_base = QueryDict(mutable=True)
+    for clave, valor in (("source", source), ("strategy", strategy_id),
+                         ("direction", direction)):
+        if valor:
+            filtros_base[clave] = valor
+    if evaluation_version and evaluation_version != "all":
+        filtros_base["evaluation_version"] = evaluation_version
+    dias = _tira_de_dias(qs, filtros_base, dia_seleccionado)
+
     if desde:
         qs = qs.filter(session_date__gte=desde)
     if hasta:
@@ -75,6 +146,8 @@ def dashboard(request):
         "alerts": qs[:200],
         "stats": stats,
         "strategies": strategies,
+        "dias": dias,
+        "dia_seleccionado": dia_seleccionado,
         "replay_strategies": Strategy.objects.filter(replay_enabled=True),
         "filters": {
             "source": source,

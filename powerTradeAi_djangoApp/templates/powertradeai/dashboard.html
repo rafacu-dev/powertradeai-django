@@ -201,6 +201,54 @@ header h1 span {
 .badge-scan.inside { background: var(--border); color: var(--text-2); }
 .badge-scan.pending { background: var(--amber-bg); color: var(--amber); }
 
+/* ---- Tira-calendario de dias ---- */
+.dias-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.dias-head {
+  display: flex; align-items: baseline; gap: 10px;
+  flex-wrap: wrap; margin-bottom: 10px;
+}
+.dias-titulo { font-size: 13px; font-weight: 600; }
+.dias-sub { font-size: 12px; color: var(--text-3); }
+.dias-tira {
+  position: relative;   /* offsetLeft de cada dia se mide contra la tira */
+  display: flex; gap: 8px;
+  overflow-x: auto; padding-bottom: 6px;
+}
+.dia {
+  flex: 0 0 auto;
+  min-width: 76px;
+  padding: 8px 10px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  text-align: center;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color .12s, transform .12s;
+}
+.dia:hover { border-color: var(--accent); transform: translateY(-1px); }
+.dia-dow { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
+.dia-fecha { font-size: 15px; font-weight: 600; margin: 1px 0 4px; white-space: nowrap; }
+.dia-neto { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dia-ops { font-size: 10px; color: var(--text-3); margin-top: 2px; }
+.dia.activo {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--surface);
+}
+.dia.positivo { background: var(--green-bg); }
+.dia.negativo { background: var(--red-bg); }
+.dias-vacio { font-size: 13px; color: var(--text-3); padding: 6px 0; }
+@media (max-width: 720px) {
+  .dia { min-width: 68px; }
+}
+
 /* ---- Filters ---- */
 .filters-bar {
   display: flex;
@@ -521,6 +569,33 @@ document.querySelectorAll('.live-rule-row').forEach(row => row.addEventListener(
   </div>
 </div>
 
+<!-- Tira-calendario: un dia por columna, con el neto de la jornada -->
+<div class="dias-card">
+  <div class="dias-head">
+    <span class="dias-titulo">Dias con actividad</span>
+    <span class="dias-sub">Pulsa un dia para ver solo sus operaciones. Pulsa el dia activo otra vez para quitar el filtro.</span>
+  </div>
+  {% if dias %}
+  <div class="dias-tira" id="dias-tira">
+    {% for d in dias %}
+    <a class="dia{% if d.activo %} activo{% endif %}{% if not d.sin_cerrar %}{% if d.neto > 0 %} positivo{% elif d.neto < 0 %} negativo{% endif %}{% endif %}"
+       href="{{ d.url }}"
+       {% if d.activo %}aria-current="date"{% endif %}
+       title="{{ d.fecha|date:'d/m/Y' }} &mdash; {{ d.operaciones }} alerta{{ d.operaciones|pluralize }}{% if d.pendientes %}, {{ d.pendientes }} pendiente{{ d.pendientes|pluralize }}{% endif %}">
+      <div class="dia-dow">{{ d.fecha|date:"D" }}</div>
+      <div class="dia-fecha">{{ d.fecha|date:"d M" }}</div>
+      <div class="dia-neto {% if d.sin_cerrar %}muted{% elif d.neto > 0 %}positive{% elif d.neto < 0 %}negative{% endif %}">
+        {% if d.sin_cerrar %}&mdash;{% else %}{{ d.signo }}${{ d.neto_abs|floatformat:2 }}{% endif %}
+      </div>
+      <div class="dia-ops">{{ d.operaciones }} op{{ d.operaciones|pluralize }}</div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="dias-vacio">No hay alertas que encajen con los filtros actuales.</div>
+  {% endif %}
+</div>
+
 <!-- Filters -->
 <form method="get" class="filters-bar">
   <div class="filter-group">
@@ -559,6 +634,21 @@ document.querySelectorAll('.live-rule-row').forEach(row => row.addEventListener(
   <button type="submit" class="btn btn-primary">Filtrar</button>
   <a href="{% url 'powertradeai:dashboard' %}" class="btn btn-ghost">Limpiar</a>
 </form>
+
+<script>
+// La tira crece hacia la derecha; sin esto el operador abre el dashboard
+// mirando el dia mas viejo de los 30.
+(function () {
+  const tira = document.getElementById('dias-tira');
+  if (!tira) return;
+  // scrollIntoView() desplazaria tambien la ventana, y abrir el dashboard con
+  // un dia activo dejaria la pagina saltada hacia abajo. Movemos solo la tira.
+  const activo = tira.querySelector('.dia.activo');
+  tira.scrollLeft = activo
+    ? activo.offsetLeft - (tira.clientWidth - activo.offsetWidth) / 2
+    : tira.scrollWidth;
+})();
+</script>
 
 <!-- Alerts table -->
 <div class="table-wrap">
