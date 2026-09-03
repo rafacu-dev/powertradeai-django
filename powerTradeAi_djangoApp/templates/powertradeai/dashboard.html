@@ -694,7 +694,7 @@ document.querySelectorAll('.live-rule-row').forEach(row => row.addEventListener(
 <div class="reglas-card">
   <div style="margin-bottom:4px">
     <span class="reglas-titulo">Rendimiento por estrategia</span>
-    <span class="reglas-sub">Solo las reglas que han disparado, sobre los filtros activos. El promedio se calcula sobre las cerradas.</span>
+    <span class="reglas-sub">Acumulado de todas las sesiones: elegir un dia no lo cambia. Solo las reglas que han disparado; el promedio se calcula sobre las cerradas.</span>
   </div>
   {% for g in por_estrategia %}
   <details class="grupo" {% if forloop.first %}open{% endif %}>

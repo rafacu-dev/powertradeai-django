@@ -183,6 +183,11 @@ def dashboard(request):
     if evaluation_version and evaluation_version != "all":
         filtros_base["evaluation_version"] = evaluation_version
     dias = _tira_de_dias(qs, filtros_base, dia_seleccionado)
+    # Acumulado historico: se agrega ANTES de acotar por fecha, igual que la
+    # tira. Elegir un dia navega la tabla de abajo, no debe reescribir el
+    # historial de cada regla — el operador quiere comparar reglas entre si
+    # sobre toda la muestra, no sobre la sesion que este mirando.
+    por_estrategia = _resumen_por_estrategia(qs)
 
     if desde:
         qs = qs.filter(session_date__gte=desde)
@@ -214,7 +219,7 @@ def dashboard(request):
         "strategies": strategies,
         "dias": dias,
         "dia_seleccionado": dia_seleccionado,
-        "por_estrategia": _resumen_por_estrategia(qs),
+        "por_estrategia": por_estrategia,
         "replay_strategies": Strategy.objects.filter(replay_enabled=True),
         "filters": {
             "source": source,
