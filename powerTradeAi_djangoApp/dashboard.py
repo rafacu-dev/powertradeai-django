@@ -31,6 +31,79 @@ REPLAY_DEFAULT_SYMBOLS = (
 DIAS_EN_TIRA = 30
 
 
+def _dinero(valor):
+    """Descompone un importe para que la plantilla lo pinte con el locale.
+
+    El signo va fuera del simbolo ("-$47,60", no "$-47,60") y el valor absoluto
+    lo formatea ``floatformat``, que respeta la coma decimal de es-es como el
+    resto del dashboard. ``vacio`` distingue "todavia no vale nada" de "vale 0".
+    """
+    if valor is None:
+        return {"vacio": True, "signo": "", "abs": Decimal("0.00"),
+                "positivo": False, "negativo": False}
+    return {
+        "vacio": False,
+        "signo": "+" if valor > 0 else ("-" if valor < 0 else ""),
+        "abs": abs(valor),
+        "positivo": valor > 0,
+        "negativo": valor < 0,
+    }
+
+
+def _resumen_por_estrategia(qs):
+    """Que ha dado cada regla, agrupado por simbolo.
+
+    Solo aparecen las reglas que han disparado al menos una vez: se agrega
+    sobre las alertas, no sobre el catalogo, asi que una regla sembrada pero
+    nunca ejecutada no ensucia la lista.
+
+    ``veces`` cuenta disparos; el neto y el promedio salen solo de las cerradas.
+    Dividir el neto entre los disparos mezclaria operaciones sin resultado con
+    las que ya lo tienen y hundiria el promedio de cualquier regla con posicion
+    abierta.
+    """
+    filas = (
+        qs.order_by()
+        .values("symbol", "strategy__strategy_id")
+        .annotate(
+            veces=Count("id"),
+            cerradas=Count("id", filter=Q(status=Alert.Status.CLOSED)),
+            pendientes=Count("id", filter=Q(status=Alert.Status.PENDING)),
+            neto=Sum("net_dollars", filter=Q(status=Alert.Status.CLOSED)),
+        )
+    )
+
+    grupos = {}
+    for fila in filas:
+        simbolo = fila["symbol"]
+        neto = fila["neto"]
+        promedio = (neto / fila["cerradas"]).quantize(Decimal("0.01")) \
+            if fila["cerradas"] else None
+        grupo = grupos.setdefault(simbolo, {
+            "simbolo": simbolo, "reglas": [], "veces": 0,
+            "cerradas": 0, "neto_bruto": Decimal("0.00"),
+        })
+        grupo["reglas"].append({
+            "regla": fila["strategy__strategy_id"],
+            "veces": fila["veces"],
+            "cerradas": fila["cerradas"],
+            "pendientes": fila["pendientes"],
+            "neto": _dinero(neto),
+            "neto_orden": neto if neto is not None else Decimal("0.00"),
+            "promedio": _dinero(promedio),
+        })
+        grupo["veces"] += fila["veces"]
+        grupo["cerradas"] += fila["cerradas"]
+        grupo["neto_bruto"] += neto or Decimal("0.00")
+
+    for grupo in grupos.values():
+        # Dentro de cada simbolo, la regla que mas ha dado primero.
+        grupo["reglas"].sort(key=lambda r: r["neto_orden"], reverse=True)
+        grupo["neto"] = _dinero(grupo["neto_bruto"] if grupo["cerradas"] else None)
+    # Los simbolos, alfabeticos: la lista no debe bailar entre recargas.
+    return sorted(grupos.values(), key=lambda g: g["simbolo"])
+
+
 def _tira_de_dias(qs, filtros_base, dia_seleccionado):
     """Una columna por sesion, con el neto cerrado de ese dia.
 
@@ -63,18 +136,11 @@ def _tira_de_dias(qs, filtros_base, dia_seleccionado):
         if not activo:
             enlace["desde"] = iso
             enlace["hasta"] = iso
-        neto = fila["neto"] if fila["neto"] is not None else Decimal("0.00")
         dias.append({
             "fecha": fila["session_date"],
-            "neto": neto,
-            # El signo va fuera del simbolo ("-$47,60", no "$-47,60"), y el
-            # valor absoluto lo formatea la plantilla para respetar la coma
-            # decimal del locale es-es, como el resto del dashboard.
-            "signo": "+" if neto > 0 else ("-" if neto < 0 else ""),
-            "neto_abs": abs(neto),
             # Un dia con alertas pero ninguna cerrada no vale 0: no vale nada
-            # todavia. Se pinta distinto para no leerlo como jornada plana.
-            "sin_cerrar": fila["neto"] is None,
+            # todavia. _dinero() lo marca ``vacio`` para no pintarlo plano.
+            "neto": _dinero(fila["neto"]),
             "operaciones": fila["operaciones"],
             "pendientes": fila["pendientes"],
             "activo": activo,
@@ -148,6 +214,7 @@ def dashboard(request):
         "strategies": strategies,
         "dias": dias,
         "dia_seleccionado": dia_seleccionado,
+        "por_estrategia": _resumen_por_estrategia(qs),
         "replay_strategies": Strategy.objects.filter(replay_enabled=True),
         "filters": {
             "source": source,

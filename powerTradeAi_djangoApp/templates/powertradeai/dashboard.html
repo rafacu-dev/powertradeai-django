@@ -249,6 +249,46 @@ header h1 span {
   .dia { min-width: 68px; }
 }
 
+/* ---- Acordeon: rendimiento por estrategia ---- */
+.reglas-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.reglas-titulo { font-size: 13px; font-weight: 600; }
+.reglas-sub { font-size: 12px; color: var(--text-3); margin-left: 8px; }
+.grupo { border-top: 1px solid var(--border); }
+.grupo:first-of-type { border-top: 0; }
+.grupo > summary {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 9px 2px; cursor: pointer; list-style: none;
+  font-size: 13px;
+}
+.grupo > summary::-webkit-details-marker { display: none; }
+.grupo > summary::before {
+  content: "\25B8"; color: var(--text-3); font-size: 10px;
+  transition: transform .12s; display: inline-block;
+}
+.grupo[open] > summary::before { transform: rotate(90deg); }
+.grupo-simbolo { font-weight: 600; letter-spacing: .02em; }
+.grupo-meta { font-size: 12px; color: var(--text-3); }
+.grupo-neto { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tabla-reglas { width: 100%; border-collapse: collapse; margin: 2px 0 12px; }
+.tabla-reglas th, .tabla-reglas td {
+  padding: 6px 8px; font-size: 12px; text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.tabla-reglas th {
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-3); font-weight: 500;
+}
+.tabla-reglas tr:last-child td { border-bottom: 0; }
+.tabla-reglas .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tabla-reglas .regla { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.reglas-vacio { font-size: 13px; color: var(--text-3); padding: 6px 0; }
+
 /* ---- Filters ---- */
 .filters-bar {
   display: flex;
@@ -578,14 +618,14 @@ document.querySelectorAll('.live-rule-row').forEach(row => row.addEventListener(
   {% if dias %}
   <div class="dias-tira" id="dias-tira">
     {% for d in dias %}
-    <a class="dia{% if d.activo %} activo{% endif %}{% if not d.sin_cerrar %}{% if d.neto > 0 %} positivo{% elif d.neto < 0 %} negativo{% endif %}{% endif %}"
+    <a class="dia{% if d.activo %} activo{% endif %}{% if d.neto.positivo %} positivo{% elif d.neto.negativo %} negativo{% endif %}"
        href="{{ d.url }}"
        {% if d.activo %}aria-current="date"{% endif %}
        title="{{ d.fecha|date:'d/m/Y' }} &mdash; {{ d.operaciones }} alerta{{ d.operaciones|pluralize }}{% if d.pendientes %}, {{ d.pendientes }} pendiente{{ d.pendientes|pluralize }}{% endif %}">
       <div class="dia-dow">{{ d.fecha|date:"D" }}</div>
       <div class="dia-fecha">{{ d.fecha|date:"d M" }}</div>
-      <div class="dia-neto {% if d.sin_cerrar %}muted{% elif d.neto > 0 %}positive{% elif d.neto < 0 %}negative{% endif %}">
-        {% if d.sin_cerrar %}&mdash;{% else %}{{ d.signo }}${{ d.neto_abs|floatformat:2 }}{% endif %}
+      <div class="dia-neto {% if d.neto.vacio %}muted{% elif d.neto.positivo %}positive{% elif d.neto.negativo %}negative{% endif %}">
+        {% if d.neto.vacio %}&mdash;{% else %}{{ d.neto.signo }}${{ d.neto.abs|floatformat:2 }}{% endif %}
       </div>
       <div class="dia-ops">{{ d.operaciones }} op{{ d.operaciones|pluralize }}</div>
     </a>
@@ -649,6 +689,51 @@ document.querySelectorAll('.live-rule-row').forEach(row => row.addEventListener(
     : tira.scrollWidth;
 })();
 </script>
+
+<!-- Rendimiento por estrategia, agrupado por simbolo -->
+<div class="reglas-card">
+  <div style="margin-bottom:4px">
+    <span class="reglas-titulo">Rendimiento por estrategia</span>
+    <span class="reglas-sub">Solo las reglas que han disparado, sobre los filtros activos. El promedio se calcula sobre las cerradas.</span>
+  </div>
+  {% for g in por_estrategia %}
+  <details class="grupo" {% if forloop.first %}open{% endif %}>
+    <summary>
+      <span class="grupo-simbolo">{{ g.simbolo }}</span>
+      <span class="grupo-meta">{{ g.reglas|length }} regla{{ g.reglas|length|pluralize }} &middot; {{ g.veces }} op{{ g.veces|pluralize }}</span>
+      <span class="grupo-neto {% if g.neto.vacio %}muted{% elif g.neto.positivo %}positive{% elif g.neto.negativo %}negative{% endif %}">
+        {% if g.neto.vacio %}&mdash;{% else %}{{ g.neto.signo }}${{ g.neto.abs|floatformat:2 }}{% endif %}
+      </span>
+    </summary>
+    <table class="tabla-reglas">
+      <thead>
+        <tr>
+          <th>Regla</th>
+          <th class="num">Veces</th>
+          <th class="num">Neto</th>
+          <th class="num">Promedio / op</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in g.reglas %}
+        <tr>
+          <td class="regla">{{ r.regla }}</td>
+          <td class="num">{{ r.veces }}{% if r.pendientes %} <span class="muted">({{ r.pendientes }} abierta{{ r.pendientes|pluralize }})</span>{% endif %}</td>
+          <td class="num {% if r.neto.vacio %}muted{% elif r.neto.positivo %}positive{% elif r.neto.negativo %}negative{% endif %}">
+            {% if r.neto.vacio %}&mdash;{% else %}{{ r.neto.signo }}${{ r.neto.abs|floatformat:2 }}{% endif %}
+          </td>
+          <td class="num {% if r.promedio.vacio %}muted{% elif r.promedio.positivo %}positive{% elif r.promedio.negativo %}negative{% endif %}">
+            {% if r.promedio.vacio %}&mdash;{% else %}{{ r.promedio.signo }}${{ r.promedio.abs|floatformat:2 }}{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% empty %}
+  <div class="reglas-vacio">Ninguna regla ha disparado con los filtros actuales.</div>
+  {% endfor %}
+</div>
 
 <!-- Alerts table -->
 <div class="table-wrap">
